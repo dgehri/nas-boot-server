@@ -12,6 +12,7 @@ use tray_item::{IconSource, TrayItem};
 use wake_on_lan::MagicPacket;
 use winapi::um::sysinfoapi::GetTickCount;
 use winapi::um::winuser::{GetLastInputInfo, LASTINPUTINFO};
+use winapi::um::winuser::{GetConsoleWindow, ShowWindow, SW_HIDE, SW_SHOW, GetForegroundWindow};
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
 use yaml_rust2::YamlLoader;
@@ -77,6 +78,8 @@ enum Message {
     ToggleAutoStart,
     ShowStatus,
     StateChanged(AppState),
+    ShowWindow,
+    HideWindow,
 }
 
 struct App {
@@ -85,23 +88,43 @@ struct App {
     state: Option<AppState>,
     config: Config,
     last_heartbeat: Instant,
+    console_window: Option<winapi::shared::windef::HWND>,
+    main_window: Option<winapi::shared::windef::HWND>,
+    window_visible: bool,
 }
 
 impl App {
     fn new(config: Config) -> Result<(Self, mpsc::Receiver<Message>)> {
+        // Get the console window handle if it exists
+        let console_window = unsafe { GetConsoleWindow() };
+        let main_window = unsafe { GetForegroundWindow() };
+        
         // Set up the tray icon
         let mut tray = TrayItem::new("NAS Boot Client", IconSource::Resource("nas_black_ico"))
             .context("Failed to create tray icon")?;
 
         // Create a channel for message passing
         let (tx, rx) = mpsc::channel(100);
-        let tx_clone = tx.clone();
-
+        
         // Status menu item
+        let tx_clone = tx.clone();
         tray.add_menu_item("Show Status", move || {
             let _ = tx_clone.blocking_send(Message::ShowStatus);
         })
         .context("Failed to add status menu item")?;
+
+        // Window show/hide menu items
+        let tx_clone = tx.clone();
+        tray.add_menu_item("Show Window", move || {
+            let _ = tx_clone.blocking_send(Message::ShowWindow);
+        })
+        .context("Failed to add show window menu item")?;
+
+        let tx_clone = tx.clone();
+        tray.add_menu_item("Hide Window", move || {
+            let _ = tx_clone.blocking_send(Message::HideWindow);
+        })
+        .context("Failed to add hide window menu item")?;
 
         // Auto-start menu item
         let tx_clone = tx.clone();
@@ -120,15 +143,21 @@ impl App {
         let app = Self {
             tray,
             tx,
-            state: None, // Start in active state
+            state: None,
             config,
             last_heartbeat: Instant::now(),
+            console_window: if console_window.is_null() { None } else { Some(console_window) },
+            main_window: if main_window.is_null() { None } else { Some(main_window) },
+            window_visible: true,
         };
 
         Ok((app, rx))
     }
 
     async fn run(mut self, mut rx: mpsc::Receiver<Message>) -> Result<()> {
+        // Hide window by default at startup
+        self.hide_window();
+        
         // Set up state check interval
         let mut interval = time::interval(Duration::from_secs(self.config.check_interval_secs));
 
@@ -164,7 +193,6 @@ impl App {
                                 }
                             }
 
-
                             // Handle heartbeat logic
                             if is_active {
                                 if !last_active {
@@ -189,6 +217,12 @@ impl App {
                         Message::ShowStatus => {
                             self.show_status()?;
                         }
+                        Message::ShowWindow => {
+                            self.show_window();
+                        }
+                        Message::HideWindow => {
+                            self.hide_window();
+                        }
                     }
                 }
             }
@@ -206,6 +240,40 @@ impl App {
             None => self.tray.set_icon(IconSource::Resource("nas_black_ico")),
         }
         .context("Failed to update tray icon")
+    }
+    
+    fn show_window(&mut self) {
+        if !self.window_visible {
+            // Show the console window if it exists
+            if let Some(hwnd) = self.console_window {
+                unsafe { ShowWindow(hwnd, SW_SHOW); }
+            }
+            
+            // Show the main window if it exists
+            if let Some(hwnd) = self.main_window {
+                unsafe { ShowWindow(hwnd, SW_SHOW); }
+            }
+            
+            self.window_visible = true;
+            info!("Showed application window");
+        }
+    }
+    
+    fn hide_window(&mut self) {
+        if self.window_visible {
+            // Hide the console window if it exists
+            if let Some(hwnd) = self.console_window {
+                unsafe { ShowWindow(hwnd, SW_HIDE); }
+            }
+            
+            // Hide the main window if it exists
+            if let Some(hwnd) = self.main_window {
+                unsafe { ShowWindow(hwnd, SW_HIDE); }
+            }
+            
+            self.window_visible = false;
+            info!("Hid application window");
+        }
     }
 
     fn toggle_auto_start(&self) -> Result<()> {
@@ -483,6 +551,13 @@ heartbeat_timeout_secs: {}
 }
 
 fn run_app() -> Result<()> {
+    // Hide the console window early
+    if let Some(hwnd) = unsafe { GetConsoleWindow() } {
+        if !hwnd.is_null() {
+            unsafe { ShowWindow(hwnd, SW_HIDE); }
+        }
+    }
+
     // Load configuration
     let config = load_config()?;
 
@@ -498,8 +573,21 @@ fn run_app() -> Result<()> {
 }
 
 fn run_app_with_console() -> Result<()> {
-    // In console mode, we don't hide the console window
-    run_app()
+    // In console mode, we don't hide the console window initially
+    // but still allow it to be toggled via the tray menu
+    
+    // Load configuration
+    let config = load_config()?;
+
+    // Run the Tokio runtime
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        // Create the app
+        let (app, rx) = App::new(config)?;
+
+        // Run the app
+        app.run(rx).await
+    })
 }
 
 fn is_user_active(idle_threshold_mins: u32) -> bool {
