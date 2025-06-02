@@ -1,0 +1,7 @@
+nas_mac: "00:08:9B:DB:EF:9A"
+nas_ip: "192.168.42.2"
+router_ip: "192.168.42.1"
+heartbeat_url: "http://192.168.42.2:8090/heartbeat"
+check_interval_secs: 30
+idle_threshold_mins: 5
+heartbeat_timeout_secs: 5

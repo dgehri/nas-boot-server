@@ -1,63 +1,13 @@
 <?xml version='1.0' encoding='windows-1252'?>
-<!--
-  Copyright (C) 2017 Christopher R. Field.
 
-  Licensed under the Apache License, Version 2.0 (the "License");
-  you may not use this file except in compliance with the License.
-  You may obtain a copy of the License at
-
-  http://www.apache.org/licenses/LICENSE-2.0
-
-  Unless required by applicable law or agreed to in writing, software
-  distributed under the License is distributed on an "AS IS" BASIS,
-  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  See the License for the specific language governing permissions and
-  limitations under the License.
--->
-
-<!--
-  The "cargo wix" subcommand provides a variety of predefined variables available
-  for customization of this template. The values for each variable are set at
-  installer creation time. The following variables are available:
-
-  TargetTriple      = The rustc target triple name.
-  TargetEnv         = The rustc target environment. This is typically either
-                      "msvc" or "gnu" depending on the toolchain downloaded and
-                      installed.
-  TargetVendor      = The rustc target vendor. This is typically "pc", but Rust
-                      does support other vendors, like "uwp".
-  CargoTargetBinDir = The complete path to the directory containing the
-                      binaries (exes) to include. The default would be
-                      "target\release\". If an explicit rustc target triple is
-                      used, i.e. cross-compiling, then the default path would
-                      be "target\<CARGO_TARGET>\<CARGO_PROFILE>",
-                      where "<CARGO_TARGET>" is replaced with the "CargoTarget"
-                      variable value and "<CARGO_PROFILE>" is replaced with the
-                      value from the "CargoProfile" variable. This can also
-                      be overridden manually with the "target-bin-dir" flag.
-  CargoTargetDir    = The path to the directory for the build artifacts, i.e.
-                      "target".
-  CargoProfile      = The cargo profile used to build the binaries
-                      (usually "debug" or "release").
-  Version           = The version for the installer. The default is the
-                      "Major.Minor.Fix" semantic versioning number of the Rust
-                      package.
--->
-
-<!--
-  Please do not remove these pre-processor If-Else blocks. These are used with
-  the `cargo wix` subcommand to automatically determine the installation
-  destination for 32-bit versus 64-bit installers. Removal of these lines will
-  cause installation errors.
--->
-<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
-    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
-<?else ?>
-    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
-<?endif ?>
+<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder"?>
+<?else?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder"?>
+<?endif?>
 
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
-     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+    xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
 
     <Product
         Id='*'
@@ -77,44 +27,39 @@
             Compressed='yes'
             InstallScope='perMachine'
             SummaryCodepage='1252'
-            />
+        />
 
         <MajorUpgrade
             Schedule='afterInstallInitialize'
-            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.' />
 
-        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
-        <Property Id='DiskPrompt' Value='NAS Boot Client Installation'/>
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1' />
+        <Property Id='DiskPrompt' Value='NAS Boot Client Installation' />
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
+            <!-- Add System32 directory reference -->
+            <Directory Id='SystemFolder' Name='System32' />
+            
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='NAS Boot Client'>
                     <Component Id='License' Guid='*'>
                         <File Id='LicenseFile'
                             DiskId='1'
                             Source='wix\License.rtf'
-                            KeyPath='yes'/>
+                            KeyPath='yes' />
                     </Component>
-                    
+
                     <Directory Id='Bin' Name='bin'>
-                        <Component Id='Path' Guid='81FB475B-18B0-446E-BD41-1D22E4710554' KeyPath='yes'>
-                            <Environment
-                                Id='PATH'
-                                Name='PATH'
-                                Value='[Bin]'
-                                Permanent='no'
-                                Part='last'
-                                Action='set'
-                                System='yes'/>
-                        </Component>
+
                         <Component Id='binary0' Guid='*'>
                             <File
                                 Id='exe0'
                                 Name='nas-boot-client.exe'
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\nas-boot-client.exe'
-                                KeyPath='yes'/>
-                            <!-- Add service installation -->
+                                KeyPath='yes' />
+
+                            <!-- Service installation with LocalSystem account -->
                             <ServiceInstall
                                 Id="ServiceInstaller"
                                 Type="ownProcess"
@@ -122,8 +67,11 @@
                                 DisplayName="NAS Boot Client"
                                 Description="Monitors user activity and manages NAS power state"
                                 Start="auto"
-                                ErrorControl="normal">
+                                ErrorControl="normal"
+                                Account="LocalSystem">
                             </ServiceInstall>
+
+                            <!-- Service control with proper shutdown handling -->
                             <ServiceControl
                                 Id="StartService"
                                 Start="install"
@@ -135,26 +83,44 @@
                     </Directory>
                 </Directory>
             </Directory>
-            
+
             <!-- Add configuration directory in user profile -->
             <Directory Id="CommonAppDataFolder" Name="ProgramData">
                 <Directory Id="ConfigDir" Name="NASBootClient">
-                    <Component Id="ConfigFolder" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890" KeyPath="yes">
+                    <Component Id="ConfigFolder" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
                         <CreateFolder>
                             <Permission User="Everyone" GenericAll="yes" />
                         </CreateFolder>
+
+                        <!-- Install the configuration file -->
+                        <File Id="ConfigFile"
+                            Name="nas-boot-client-config.yaml"
+                            DiskId="1"
+                            Source="wix\nas-boot-client-config.yaml"
+                            KeyPath="yes" />
+
                         <RemoveFolder Id="ConfigDirRemove" On="uninstall" />
-                        <util:RemoveFolderEx Id="ConfigFolderCleanup" On="uninstall" Property="CommonAppDataFolder" />
+                        <!-- Fix the RemoveFolderEx property -->
+                        <util:RemoveFolderEx Id="ConfigFolderCleanup" On="uninstall" Property="CONFIGDIR" />
                     </Component>
                 </Directory>
             </Directory>
         </Directory>
 
-        <!-- Generate configuration file on first install -->
-        <CustomAction Id="GenerateConfigAction" 
-                      Directory="Bin"
-                      ExeCommand="&quot;[Bin]nas-boot-client.exe&quot; generate-config" 
-                      Return="ignore" />
+        <!-- Custom actions for service management with elevated privileges -->
+        <CustomAction Id="StopServiceAction"
+            Directory="SystemFolder"
+            ExeCommand="cmd.exe /c &quot;net stop NASBootClient 2&gt;nul || sc stop NASBootClient 2&gt;nul || echo Service already stopped&quot;"
+            Execute="deferred"
+            Impersonate="no"
+            Return="ignore" />
+
+        <CustomAction Id="RemoveServiceAction"
+            Directory="SystemFolder"
+            ExeCommand="cmd.exe /c &quot;sc delete NASBootClient 2&gt;nul || echo Service already removed&quot;"
+            Execute="deferred"
+            Impersonate="no"
+            Return="ignore" />
 
         <Feature
             Id='Complete'
@@ -165,34 +131,29 @@
             AllowAdvertise='no'
             Display='expand'
             Absent='disallow'>
-            
-            <ComponentRef Id='License'/>
-            <ComponentRef Id='binary0'/>
-            <ComponentRef Id='ConfigFolder'/>
 
-            <Feature
-                Id='Environment'
-                Title='PATH Environment Variable'
-                Description='Add the install location of the [ProductName] executable to the PATH system environment variable. This allows the [ProductName] executable to be called from any location.'
-                Level='1'
-                Absent='allow'>
-                <ComponentRef Id='Path'/>
-            </Feature>
+            <ComponentRef Id='License' />
+            <ComponentRef Id='binary0' />
+            <ComponentRef Id='ConfigFolder' />
         </Feature>
 
+        <!-- Updated InstallExecuteSequence with proper sequencing for deferred actions -->
         <InstallExecuteSequence>
-            <!-- Generate configuration after installation -->
-            <Custom Action="GenerateConfigAction" After="InstallFinalize">NOT Installed</Custom>
+            <!-- Stop service before standard service control actions -->
+            <Custom Action="StopServiceAction" After="StopServices">REMOVE="ALL"</Custom>
+            
+            <!-- Remove service after stopping -->
+            <Custom Action="RemoveServiceAction" After="StopServiceAction">REMOVE="ALL"</Custom>
         </InstallExecuteSequence>
 
-        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
-        
-        <Property Id='ARPHELPLINK' Value='https://github.com/user/nas-boot-client'/>
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize' />
+
+        <Property Id='ARPHELPLINK' Value='https://github.com/user/nas-boot-client' />
 
         <UI>
-            <UIRef Id='WixUI_FeatureTree'/>
+            <UIRef Id='WixUI_FeatureTree' />
         </UI>
 
-        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf'/>
+        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf' />
     </Product>
 </Wix>

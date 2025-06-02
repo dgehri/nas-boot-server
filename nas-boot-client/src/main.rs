@@ -4,14 +4,14 @@ use clap::{Parser, Subcommand};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 use wake_on_lan::MagicPacket;
-use winapi::um::winuser::{GetLastInputInfo, LASTINPUTINFO};
 use windows_service::{
     define_windows_service,
     service::{
@@ -23,9 +23,6 @@ use windows_service::{
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
 use yaml_rust2::YamlLoader;
-
-// Add event logger module
-mod event_logger;
 
 const SERVICE_NAME: &str = "NASBootClient";
 const SERVICE_DISPLAY_NAME: &str = "NAS Boot Client";
@@ -67,7 +64,7 @@ impl Default for Config {
             nas_mac: "00:08:9B:DB:EF:9A".to_string(),
             nas_ip: "192.168.42.2".to_string(),
             router_ip: "192.168.42.1".to_string(),
-            heartbeat_url: "http://192.168.42.2:9000/heartbeat".to_string(),
+            heartbeat_url: "http://192.168.42.2:8090/heartbeat".to_string(),
             check_interval_secs: 30,
             idle_threshold_mins: 5,
             heartbeat_timeout_secs: 5,
@@ -97,9 +94,12 @@ fn main() -> Result<()> {
 }
 
 fn get_config_path() -> PathBuf {
-    let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    path.push(".config");
-    path.push("nas-boot");
+    // Use system-wide config location instead of user home directory
+    // Determine path from env variable:
+    let program_data_dir =
+        std::env::var("ProgramData").unwrap_or_else(|_| String::from("C:\\ProgramData"));
+    let mut path = PathBuf::from(program_data_dir);
+    path.push("NASBootClient");
     path.push("nas-boot-client-config.yaml");
     path
 }
@@ -239,7 +239,6 @@ fn uninstall_service() -> Result<()> {
 fn run_console_mode() -> Result<()> {
     // Initialize the logger for console mode
     env_logger::builder()
-        .format_timestamp(None)
         .filter_level(log::LevelFilter::Info)
         .init();
 
@@ -261,7 +260,7 @@ fn run_console_mode() -> Result<()> {
                     info!("Received Ctrl+C, shutting down...");
                     r.store(false, Ordering::Relaxed);
                 }
-                Err(err) => error!("Unable to listen for Ctrl+C: {}", err),
+                Err(err) => error!("Unable to listen for Ctrl+C: {err}"),
             }
         });
 
@@ -269,9 +268,6 @@ fn run_console_mode() -> Result<()> {
     });
 
     info!("Console mode exited");
-
-    // Make sure to explicitly shut down the event logger
-    event_logger::EventLogger::shutdown();
 
     Ok(())
 }
@@ -283,32 +279,28 @@ fn service_main(_arguments: Vec<OsString>) {
 }
 
 fn run_service() -> windows_service::Result<()> {
-    // Register the service control handler FIRST
+    // For debugging purposes, write to a log file in the ProgramData directory
+    let log_file_path = get_config_path().with_extension("log");
+    let log_target = Box::new(File::create(&log_file_path).map_err(|e| {
+        windows_service::Error::Winapi(std::io::Error::other(format!(
+            "Failed to create log file: {e}"
+        )))
+    })?);
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .target(env_logger::Target::Pipe(log_target))
+        .init();
+    info!("Service starting...");
+
+    // Create shutdown signal FIRST
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    // Register the service control handler
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop | ServiceControl::Shutdown => {
-                info!("Received stop/shutdown command");
-
-                // Signal service is stopping
-                if let Some(ref status_handle) = unsafe { event_logger::STATUS_HANDLE } {
-                    let _ = status_handle.set_service_status(ServiceStatus {
-                        service_type: ServiceType::OWN_PROCESS,
-                        current_state: ServiceState::StopPending,
-                        controls_accepted: ServiceControlAccept::empty(),
-                        exit_code: ServiceExitCode::Win32(0),
-                        checkpoint: 0,
-                        wait_hint: Duration::from_secs(5),
-                        process_id: None,
-                    });
-                }
-
-                // Signal to the runtime to shut down
-                SERVICE_SHUTDOWN.with(|cell| {
-                    if let Some(shutdown) = cell.get() {
-                        shutdown.store(true, Ordering::Relaxed);
-                    }
-                });
-
+                info!("Service stop requested");
+                r.store(false, Ordering::Relaxed);
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -316,15 +308,13 @@ fn run_service() -> windows_service::Result<()> {
         }
     };
 
+    info!("Registering service control handler for {SERVICE_NAME}");
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
 
-    // Initialize the event logger with the status handle
-    if let Err(e) = event_logger::EventLogger::init(Some(status_handle.clone())) {
-        eprintln!("Failed to initialize event logger: {}", e);
-    }
+    info!("Service handler registered successfully");
 
     // Update the service status to running
-    status_handle.set_service_status(ServiceStatus {
+    if let Err(e) = status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Running,
         controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
@@ -332,43 +322,74 @@ fn run_service() -> windows_service::Result<()> {
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
-    })?;
+    }) {
+        error!("Failed to set service status to running: {e}");
+        return Err(e);
+    }
 
-    info!("Service started");
+    info!("Service status set to running");
 
-    // Load configuration
+    // Load configuration with detailed error reporting
     let config = match load_config() {
-        Ok(c) => c,
+        Ok(c) => {
+            info!("Configuration loaded successfully");
+            c
+        }
         Err(e) => {
             error!("Failed to load configuration: {e}");
-            return Err(windows_service::Error::Winapi(
-                std::io::Error::from_raw_os_error(1),
-            ));
+            // Update service status to stopped with error
+            let _ = status_handle.set_service_status(ServiceStatus {
+                service_type: ServiceType::OWN_PROCESS,
+                current_state: ServiceState::Stopped,
+                controls_accepted: ServiceControlAccept::empty(),
+                exit_code: ServiceExitCode::ServiceSpecific(1),
+                checkpoint: 0,
+                wait_hint: Duration::default(),
+                process_id: None,
+            });
+            return Err(windows_service::Error::Winapi(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Config load failed: {e}"),
+            )));
         }
     };
 
-    // Create a runtime for async operations
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    info!("Creating Tokio runtime");
 
-    // Create shutdown signal
-    let shutdown = Arc::new(AtomicBool::new(false));
-    SERVICE_SHUTDOWN.with(|cell| {
-        let _ = cell.set(shutdown.clone());
-    });
+    // Create a runtime for async operations
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => {
+            info!("Tokio runtime created successfully");
+            runtime
+        }
+        Err(e) => {
+            error!("Failed to create Tokio runtime: {e}");
+            let _ = status_handle.set_service_status(ServiceStatus {
+                service_type: ServiceType::OWN_PROCESS,
+                current_state: ServiceState::Stopped,
+                controls_accepted: ServiceControlAccept::empty(),
+                exit_code: ServiceExitCode::ServiceSpecific(2),
+                checkpoint: 0,
+                wait_hint: Duration::default(),
+                process_id: None,
+            });
+            return Err(windows_service::Error::Winapi(std::io::Error::other(
+                format!("Runtime creation failed: {e}"),
+            )));
+        }
+    };
+
+    info!("Starting monitor loop");
 
     // Run the monitor loop
     rt.block_on(async {
-        monitor_loop(shutdown.clone(), config).await;
+        monitor_loop(running.clone(), config).await;
     });
 
-    // Signal service has stopped
-    info!("Service stopped successfully");
-
-    // Clean up event logger
-    event_logger::EventLogger::shutdown();
+    info!("Monitor loop completed, shutting down service");
 
     // Update the service status to stopped
-    status_handle.set_service_status(ServiceStatus {
+    let _ = status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
@@ -376,21 +397,20 @@ fn run_service() -> windows_service::Result<()> {
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
-    })?;
+    });
 
+    info!("Service stopped successfully");
     Ok(())
-}
-
-// Global shutdown signal for the service
-thread_local! {
-    static SERVICE_SHUTDOWN: std::cell::OnceCell<Arc<AtomicBool>> = std::cell::OnceCell::new();
 }
 
 async fn monitor_loop(running: Arc<AtomicBool>, config: Config) {
     let mut interval = time::interval(Duration::from_secs(config.check_interval_secs));
     let mut last_active = false;
 
-    info!("Monitor loop started");
+    info!(
+        "Monitor loop started with config: server={}",
+        config.heartbeat_url
+    );
 
     while running.load(Ordering::Relaxed) {
         interval.tick().await;
@@ -409,41 +429,63 @@ async fn monitor_loop(running: Arc<AtomicBool>, config: Config) {
         last_active = is_active;
     }
 
-    info!("Monitor loop stopped");
+    info!("Monitor loop exiting");
 }
 
 fn is_user_active(idle_threshold_mins: u32) -> bool {
-    // Check user input activity
-    let mut last_input = LASTINPUTINFO {
-        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-        dwTime: 0,
-    };
-
-    unsafe {
-        if GetLastInputInfo(&mut last_input) != 0 {
-            let current_tick = winapi::um::sysinfoapi::GetTickCount();
-            let idle_time_ms = current_tick - last_input.dwTime;
-            let idle_time_mins = idle_time_ms / (1000 * 60);
-
-            let is_active = idle_time_mins < idle_threshold_mins;
-            if is_active {
-                info!(
-                    "User is active (idle for {} minutes, threshold is {} minutes)",
-                    idle_time_mins, idle_threshold_mins
-                );
-            } else {
-                info!(
-                    "User is inactive (idle for {} minutes, threshold is {} minutes)",
-                    idle_time_mins, idle_threshold_mins
-                );
-            }
-
-            return is_active;
-        }
+    // First check if anyone is logged in
+    if !has_active_user_sessions() {
+        info!("No active user sessions");
+        return false;
     }
 
-    error!("Failed to get last input info");
-    false
+    // TODO: detect user activity by checking file system changes
+
+    true
+}
+
+fn has_active_user_sessions() -> bool {
+    match Command::new("query").args(["session"]).output() {
+        Ok(output) => {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+
+            // Look for active sessions
+            for line in output_str.lines() {
+                let line = line.trim();
+
+                // Skip header lines
+                if line.starts_with("SESSIONNAME") || line.starts_with('-') || line.is_empty() {
+                    continue;
+                }
+
+                // Check for active console sessions
+                if line.contains("console") && line.contains("Active") {
+                    info!("Active console session detected: {line}");
+                    return true;
+                }
+
+                // Check for active RDP sessions
+                if line.contains("rdp-tcp") && line.contains("Active") {
+                    info!("Active RDP session detected: {line}");
+                    return true;
+                }
+
+                // Check for any other active sessions
+                if line.contains("Active") {
+                    info!("Active session detected: {line}");
+                    return true;
+                }
+            }
+
+            info!("No active user sessions found");
+            false
+        }
+        Err(e) => {
+            error!("Failed to query sessions: {e}");
+            // Fallback: assume user is active if we can't determine
+            true
+        }
+    }
 }
 
 async fn wake_nas(config: &Config) {
@@ -488,7 +530,7 @@ async fn send_heartbeat(config: &Config) {
         .to_string_lossy()
         .to_string();
 
-    info!("Sending heartbeat from {}", hostname);
+    info!("Sending heartbeat from {hostname}");
 
     match client
         .post(&config.heartbeat_url)
