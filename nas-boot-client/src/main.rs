@@ -12,7 +12,7 @@ use tray_item::{IconSource, TrayItem};
 use wake_on_lan::MagicPacket;
 use winapi::um::sysinfoapi::GetTickCount;
 use winapi::um::winuser::{GetLastInputInfo, LASTINPUTINFO};
-use winapi::um::winuser::{GetConsoleWindow, ShowWindow, SW_HIDE, SW_SHOW, GetForegroundWindow};
+use winapi::um::winuser::{ShowWindow, SW_HIDE, SW_SHOW, GetForegroundWindow};
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
 use yaml_rust2::YamlLoader;
