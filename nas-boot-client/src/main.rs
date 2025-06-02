@@ -3,30 +3,18 @@ use chrono::Local;
 use clap::{Parser, Subcommand};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::time;
+use tray_item::{IconSource, TrayItem};
 use wake_on_lan::MagicPacket;
-use windows_service::{
-    define_windows_service,
-    service::{
-        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
-        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
-    },
-    service_control_handler::{self, ServiceControlHandlerResult},
-    service_dispatcher,
-    service_manager::{ServiceManager, ServiceManagerAccess},
-};
+use winapi::um::sysinfoapi::GetTickCount;
+use winapi::um::winuser::{GetLastInputInfo, LASTINPUTINFO};
+use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+use winreg::RegKey;
 use yaml_rust2::YamlLoader;
-
-const SERVICE_NAME: &str = "NASBootClient";
-const SERVICE_DISPLAY_NAME: &str = "NAS Boot Client";
-const SERVICE_DESCRIPTION: &str = "Monitors user activity and wakes NAS when needed";
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -37,14 +25,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Install the Windows service
-    Install,
-    /// Uninstall the Windows service
-    Uninstall,
     /// Generate default configuration file
     GenerateConfig,
-    /// Run in console mode (for testing)
-    Run,
+
+    /// Enable auto-start with Windows login
+    EnableAutoStart,
+
+    /// Disable auto-start with Windows login
+    DisableAutoStart,
+
+    /// Run the application in the foreground (for debugging)
+    Debug,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,25 +63,318 @@ impl Default for Config {
     }
 }
 
-define_windows_service!(ffi_service_main, service_main);
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AppState {
+    Active,
+    Idle,
+    NoNas,
+}
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+#[derive(Debug)]
+enum Message {
+    Quit,
+    CheckState,
+    ToggleAutoStart,
+    ShowStatus,
+    StateChanged(AppState),
+}
 
-    match cli.command {
-        Some(Commands::Install) => install_service()?,
-        Some(Commands::Uninstall) => uninstall_service()?,
-        Some(Commands::GenerateConfig) => generate_config()?,
-        Some(Commands::Run) => run_console_mode()?,
-        None => {
-            // Run as Windows service
-            info!("Starting service dispatcher");
-            service_dispatcher::start(SERVICE_NAME, ffi_service_main)
-                .map_err(|e| anyhow::anyhow!("Service dispatcher error: {:?}", e))?;
+struct App {
+    tray: TrayItem,
+    tx: mpsc::Sender<Message>,
+    state: Option<AppState>,
+    config: Config,
+    last_heartbeat: Instant,
+}
+
+impl App {
+    fn new(config: Config) -> Result<(Self, mpsc::Receiver<Message>)> {
+        // Set up the tray icon
+        let mut tray = TrayItem::new("NAS Boot Client", IconSource::Resource("nas_black_ico"))
+            .context("Failed to create tray icon")?;
+
+        // Create a channel for message passing
+        let (tx, rx) = mpsc::channel(100);
+        let tx_clone = tx.clone();
+
+        // Status menu item
+        tray.add_menu_item("Show Status", move || {
+            let _ = tx_clone.blocking_send(Message::ShowStatus);
+        })
+        .context("Failed to add status menu item")?;
+
+        // Auto-start menu item
+        let tx_clone = tx.clone();
+        tray.add_menu_item("Toggle Auto-start", move || {
+            let _ = tx_clone.blocking_send(Message::ToggleAutoStart);
+        })
+        .context("Failed to add auto-start menu item")?;
+
+        // Quit menu item
+        let tx_clone = tx.clone();
+        tray.add_menu_item("Quit", move || {
+            let _ = tx_clone.blocking_send(Message::Quit);
+        })
+        .context("Failed to add quit menu item")?;
+
+        let app = Self {
+            tray,
+            tx,
+            state: None, // Start in active state
+            config,
+            last_heartbeat: Instant::now(),
+        };
+
+        Ok((app, rx))
+    }
+
+    async fn run(mut self, mut rx: mpsc::Receiver<Message>) -> Result<()> {
+        // Set up state check interval
+        let mut interval = time::interval(Duration::from_secs(self.config.check_interval_secs));
+
+        // Set up heartbeat state
+        let mut last_active = true;
+
+        info!("App started, waiting for messages");
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // Time to check state
+                    self.tx.send(Message::CheckState).await?;
+                }
+
+                Some(msg) = rx.recv() => {
+                    match msg {
+                        Message::Quit => {
+                            info!("Quit message received");
+                            break;
+                        }
+                        Message::CheckState => {
+                            let is_active = is_user_active(self.config.idle_threshold_mins);
+                            let new_state = if is_active {
+                                Some(AppState::Active)
+                            } else {
+                                Some(AppState::Idle)
+                            };
+
+                            if new_state != self.state {
+                                if let Some(new_state) = new_state {
+                                    self.tx.send(Message::StateChanged(new_state)).await?;
+                                }
+                            }
+
+
+                            // Handle heartbeat logic
+                            if is_active {
+                                if !last_active {
+                                    info!("User became active, waking NAS");
+                                    self.wake_nas().await;
+                                }
+
+                                // Send heartbeat if we're active
+                                self.send_heartbeat().await;
+                            }
+
+                            last_active = is_active;
+                        }
+                        Message::StateChanged(new_state) => {
+                            info!("State changed from {:?} to {:?}", self.state, new_state);
+                            self.state = Some(new_state);
+                            self.update_tray_icon()?;
+                        }
+                        Message::ToggleAutoStart => {
+                            self.toggle_auto_start()?;
+                        }
+                        Message::ShowStatus => {
+                            self.show_status()?;
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Exiting application");
+        Ok(())
+    }
+
+    fn update_tray_icon(&mut self) -> Result<()> {
+        match self.state {
+            Some(AppState::Active) => self.tray.set_icon(IconSource::Resource("nas_green_ico")),
+            Some(AppState::Idle) => self.tray.set_icon(IconSource::Resource("nas_black_ico")),
+            Some(AppState::NoNas) => self.tray.set_icon(IconSource::Resource("nas_red_ico")),
+            None => self.tray.set_icon(IconSource::Resource("nas_black_ico")),
+        }
+        .context("Failed to update tray icon")
+    }
+
+    fn toggle_auto_start(&self) -> Result<()> {
+        let auto_start_enabled = is_auto_start_enabled()?;
+        set_auto_start(!auto_start_enabled)?;
+
+        info!(
+            "Auto-start is now {}",
+            if auto_start_enabled {
+                "disabled"
+            } else {
+                "enabled"
+            }
+        );
+        show_balloon_tip(
+            "Auto-start Setting",
+            &format!(
+                "Auto-start has been {}",
+                if auto_start_enabled {
+                    "disabled"
+                } else {
+                    "enabled"
+                }
+            ),
+        );
+        Ok(())
+    }
+
+    fn show_status(&self) -> Result<()> {
+        let message = format!(
+            "NAS Boot Client Status\n\n\
+             Connection: {}\n\
+             Current state: {:?}\n\
+             Last activity check: {}s ago\n\
+             Auto-start: {}",
+            if self.state == Some(AppState::NoNas) {
+                "Disconnected"
+            } else {
+                "Connected"
+            },
+            self.state,
+            self.last_heartbeat.elapsed().as_secs(),
+            if is_auto_start_enabled().unwrap_or(false) {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        );
+
+        show_balloon_tip("NAS Boot Client", &message);
+        info!("Displayed status message");
+        Ok(())
+    }
+
+    async fn wake_nas(&mut self) {
+        // Parse MAC address
+        let mac_parts: Vec<u8> = self
+            .config
+            .nas_mac
+            .split(':')
+            .filter_map(|s| u8::from_str_radix(s, 16).ok())
+            .collect();
+
+        if mac_parts.len() == 6 {
+            let mac: [u8; 6] = [
+                mac_parts[0],
+                mac_parts[1],
+                mac_parts[2],
+                mac_parts[3],
+                mac_parts[4],
+                mac_parts[5],
+            ];
+
+            match MagicPacket::new(&mac).send() {
+                Ok(()) => {
+                    info!("Sent WOL packet to NAS");
+                    show_balloon_tip("NAS Boot Client", "Waking up NAS...");
+                }
+                Err(e) => error!("Failed to send WOL packet: {e}"),
+            }
+
+            // Send via router
+            let router_addr = format!("{}:9", self.config.router_ip);
+            match MagicPacket::new(&mac).send_to(&router_addr as &str, "0.0.0.0:0") {
+                Ok(()) => info!("Sent WOL packet via router"),
+                Err(e) => error!("Failed to send WOL packet via router: {e}"),
+            }
+        } else {
+            error!("Invalid MAC address format");
         }
     }
 
-    Ok(())
+    async fn send_heartbeat(&mut self) {
+        let client = reqwest::Client::new();
+        let timestamp = Local::now().to_rfc3339();
+        let hostname = hostname::get()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        info!("Sending heartbeat from {hostname}");
+        self.last_heartbeat = Instant::now();
+
+        match client
+            .post(&self.config.heartbeat_url)
+            .json(&serde_json::json!({
+                "timestamp": timestamp,
+                "hostname": hostname
+            }))
+            .timeout(Duration::from_secs(self.config.heartbeat_timeout_secs))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    info!(
+                        "Heartbeat sent successfully to {}",
+                        self.config.heartbeat_url
+                    );
+                    if self.state == Some(AppState::NoNas) {
+                        self.tx
+                            .send(Message::StateChanged(AppState::Active))
+                            .await
+                            .ok();
+                    }
+                } else {
+                    error!("Heartbeat failed with status: {}", response.status());
+                    if self.state != Some(AppState::NoNas) {
+                        self.tx
+                            .send(Message::StateChanged(AppState::NoNas))
+                            .await
+                            .ok();
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to send heartbeat: {e}");
+                if self.state != Some(AppState::NoNas) {
+                    self.tx
+                        .send(Message::StateChanged(AppState::NoNas))
+                        .await
+                        .ok();
+                }
+            }
+        }
+    }
+}
+
+fn main() -> Result<()> {
+    // Initialize logging
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        .init();
+
+    info!("NAS Boot Client starting...");
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::GenerateConfig) => generate_config(),
+        Some(Commands::EnableAutoStart) => set_auto_start(true).map(|()| {
+            println!("Auto-start enabled");
+        }),
+        Some(Commands::DisableAutoStart) => set_auto_start(false).map(|()| {
+            println!("Auto-start disabled");
+        }),
+        Some(Commands::Debug) => run_app_with_console(),
+        None => run_app(),
+    }
 }
 
 fn get_config_path() -> PathBuf {
@@ -198,357 +482,97 @@ heartbeat_timeout_secs: {}
     Ok(())
 }
 
-fn install_service() -> Result<()> {
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)?;
-
-    let service_binary_path = std::env::current_exe()?;
-
-    let service_info = ServiceInfo {
-        name: OsString::from(SERVICE_NAME),
-        display_name: OsString::from(SERVICE_DISPLAY_NAME),
-        service_type: ServiceType::OWN_PROCESS,
-        start_type: ServiceStartType::AutoStart,
-        error_control: ServiceErrorControl::Normal,
-        executable_path: service_binary_path,
-        launch_arguments: vec![],
-        dependencies: vec![],
-        account_name: None,
-        account_password: None,
-    };
-
-    let service = manager.create_service(&service_info, ServiceAccess::ALL_ACCESS)?;
-
-    service.set_description(SERVICE_DESCRIPTION)?;
-
-    println!("Service '{SERVICE_NAME}' installed successfully");
-    println!("Start it with: sc start {SERVICE_NAME}");
-    Ok(())
-}
-
-fn uninstall_service() -> Result<()> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    let service = manager.open_service(SERVICE_NAME, ServiceAccess::DELETE)?;
-
-    service.delete()?;
-
-    println!("Service '{SERVICE_NAME}' uninstalled successfully");
-    Ok(())
-}
-
-fn run_console_mode() -> Result<()> {
-    // Initialize the logger for console mode
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Info)
-        .init();
-
-    info!("Starting in console mode");
-
+fn run_app() -> Result<()> {
+    // Load configuration
     let config = load_config()?;
+
+    // Run the Tokio runtime
     let rt = tokio::runtime::Runtime::new()?;
-
-    // Create a Ctrl+C handler for console mode
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-
     rt.block_on(async {
-        // Set up Ctrl-C handler for graceful shutdown in console mode
-        let r = r.clone();
-        tokio::spawn(async move {
-            match tokio::signal::ctrl_c().await {
-                Ok(()) => {
-                    info!("Received Ctrl+C, shutting down...");
-                    r.store(false, Ordering::Relaxed);
-                }
-                Err(err) => error!("Unable to listen for Ctrl+C: {err}"),
-            }
-        });
+        // Create the app
+        let (app, rx) = App::new(config)?;
 
-        monitor_loop(running, config).await;
-    });
-
-    info!("Console mode exited");
-
-    Ok(())
+        // Run the app
+        app.run(rx).await
+    })
 }
 
-fn service_main(_arguments: Vec<OsString>) {
-    if let Err(e) = run_service() {
-        error!("Service error: {e}");
-    }
-}
-
-fn run_service() -> windows_service::Result<()> {
-    // For debugging purposes, write to a log file in the ProgramData directory
-    let log_file_path = get_config_path().with_extension("log");
-    let log_target = Box::new(File::create(&log_file_path).map_err(|e| {
-        windows_service::Error::Winapi(std::io::Error::other(format!(
-            "Failed to create log file: {e}"
-        )))
-    })?);
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .target(env_logger::Target::Pipe(log_target))
-        .init();
-    info!("Service starting...");
-
-    // Create shutdown signal FIRST
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-
-    // Register the service control handler
-    let event_handler = move |control_event| -> ServiceControlHandlerResult {
-        match control_event {
-            ServiceControl::Stop | ServiceControl::Shutdown => {
-                info!("Service stop requested");
-                r.store(false, Ordering::Relaxed);
-                ServiceControlHandlerResult::NoError
-            }
-            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            _ => ServiceControlHandlerResult::NotImplemented,
-        }
-    };
-
-    info!("Registering service control handler for {SERVICE_NAME}");
-    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
-
-    info!("Service handler registered successfully");
-
-    // Update the service status to running
-    if let Err(e) = status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    }) {
-        error!("Failed to set service status to running: {e}");
-        return Err(e);
-    }
-
-    info!("Service status set to running");
-
-    // Load configuration with detailed error reporting
-    let config = match load_config() {
-        Ok(c) => {
-            info!("Configuration loaded successfully");
-            c
-        }
-        Err(e) => {
-            error!("Failed to load configuration: {e}");
-            // Update service status to stopped with error
-            let _ = status_handle.set_service_status(ServiceStatus {
-                service_type: ServiceType::OWN_PROCESS,
-                current_state: ServiceState::Stopped,
-                controls_accepted: ServiceControlAccept::empty(),
-                exit_code: ServiceExitCode::ServiceSpecific(1),
-                checkpoint: 0,
-                wait_hint: Duration::default(),
-                process_id: None,
-            });
-            return Err(windows_service::Error::Winapi(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Config load failed: {e}"),
-            )));
-        }
-    };
-
-    info!("Creating Tokio runtime");
-
-    // Create a runtime for async operations
-    let rt = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => {
-            info!("Tokio runtime created successfully");
-            runtime
-        }
-        Err(e) => {
-            error!("Failed to create Tokio runtime: {e}");
-            let _ = status_handle.set_service_status(ServiceStatus {
-                service_type: ServiceType::OWN_PROCESS,
-                current_state: ServiceState::Stopped,
-                controls_accepted: ServiceControlAccept::empty(),
-                exit_code: ServiceExitCode::ServiceSpecific(2),
-                checkpoint: 0,
-                wait_hint: Duration::default(),
-                process_id: None,
-            });
-            return Err(windows_service::Error::Winapi(std::io::Error::other(
-                format!("Runtime creation failed: {e}"),
-            )));
-        }
-    };
-
-    info!("Starting monitor loop");
-
-    // Run the monitor loop
-    rt.block_on(async {
-        monitor_loop(running.clone(), config).await;
-    });
-
-    info!("Monitor loop completed, shutting down service");
-
-    // Update the service status to stopped
-    let _ = status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Stopped,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    });
-
-    info!("Service stopped successfully");
-    Ok(())
-}
-
-async fn monitor_loop(running: Arc<AtomicBool>, config: Config) {
-    let mut interval = time::interval(Duration::from_secs(config.check_interval_secs));
-    let mut last_active = false;
-
-    info!(
-        "Monitor loop started with config: server={}",
-        config.heartbeat_url
-    );
-
-    while running.load(Ordering::Relaxed) {
-        interval.tick().await;
-
-        let is_active = is_user_active(config.idle_threshold_mins);
-
-        if is_active && !last_active {
-            info!("User became active, waking NAS");
-            wake_nas(&config).await;
-        }
-
-        if is_active {
-            send_heartbeat(&config).await;
-        }
-
-        last_active = is_active;
-    }
-
-    info!("Monitor loop exiting");
+fn run_app_with_console() -> Result<()> {
+    // In console mode, we don't hide the console window
+    run_app()
 }
 
 fn is_user_active(idle_threshold_mins: u32) -> bool {
-    // First check if anyone is logged in
-    if !has_active_user_sessions() {
-        info!("No active user sessions");
-        return false;
+    // Calculate idle threshold in milliseconds
+    let idle_threshold_ms = u64::from(idle_threshold_mins) * 60 * 1000;
+
+    // Get current tick count
+    let current_tick_count = unsafe { GetTickCount() };
+
+    // Initialize LASTINPUTINFO structure
+    let mut last_input_info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+
+    // Get the last input info
+    let result = unsafe { GetLastInputInfo(&mut last_input_info) };
+
+    if result == 0 {
+        error!("Failed to get last input info");
+        return true; // Assume user is active if we can't determine
     }
 
-    // TODO: detect user activity by checking file system changes
+    // Calculate idle time in milliseconds
+    let idle_time = current_tick_count.wrapping_sub(last_input_info.dwTime);
 
-    true
+    // Consider user active if idle time is less than threshold
+    idle_time < idle_threshold_ms as u32
 }
 
-fn has_active_user_sessions() -> bool {
-    match Command::new("query").args(["session"]).output() {
-        Ok(output) => {
-            let output_str = String::from_utf8_lossy(&output.stdout);
+fn set_auto_start(enable: bool) -> Result<()> {
+    let run_key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            KEY_WRITE,
+        )
+        .context("Failed to open registry key")?;
 
-            // Look for active sessions
-            for line in output_str.lines() {
-                let line = line.trim();
+    let app_path = std::env::current_exe()?.to_string_lossy().to_string();
 
-                // Skip header lines
-                if line.starts_with("SESSIONNAME") || line.starts_with('-') || line.is_empty() {
-                    continue;
-                }
-
-                // Check for active console sessions
-                if line.contains("console") && line.contains("Active") {
-                    info!("Active console session detected: {line}");
-                    return true;
-                }
-
-                // Check for active RDP sessions
-                if line.contains("rdp-tcp") && line.contains("Active") {
-                    info!("Active RDP session detected: {line}");
-                    return true;
-                }
-
-                // Check for any other active sessions
-                if line.contains("Active") {
-                    info!("Active session detected: {line}");
-                    return true;
-                }
-            }
-
-            info!("No active user sessions found");
-            false
-        }
-        Err(e) => {
-            error!("Failed to query sessions: {e}");
-            // Fallback: assume user is active if we can't determine
-            true
-        }
-    }
-}
-
-async fn wake_nas(config: &Config) {
-    // Parse MAC address
-    let mac_parts: Vec<u8> = config
-        .nas_mac
-        .split(':')
-        .filter_map(|s| u8::from_str_radix(s, 16).ok())
-        .collect();
-
-    if mac_parts.len() == 6 {
-        let mac: [u8; 6] = [
-            mac_parts[0],
-            mac_parts[1],
-            mac_parts[2],
-            mac_parts[3],
-            mac_parts[4],
-            mac_parts[5],
-        ];
-
-        match MagicPacket::new(&mac).send() {
-            Ok(()) => info!("Sent WOL packet to NAS"),
-            Err(e) => error!("Failed to send WOL packet: {e}"),
-        }
-
-        // Send via router
-        let router_addr = format!("{}:9", config.router_ip);
-        match MagicPacket::new(&mac).send_to(&router_addr as &str, "0.0.0.0:0") {
-            Ok(()) => info!("Sent WOL packet via router"),
-            Err(e) => error!("Failed to send WOL packet via router: {e}"),
-        }
+    if enable {
+        run_key
+            .set_value("NASBootClient", &app_path)
+            .context("Failed to set registry value")?;
+        info!("Auto-start enabled");
     } else {
-        error!("Invalid MAC address format");
+        // Ignore errors if the key doesn't exist
+        let _ = run_key.delete_value("NASBootClient");
+        info!("Auto-start disabled");
+    }
+
+    Ok(())
+}
+
+fn is_auto_start_enabled() -> Result<bool> {
+    let run_key = match RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        KEY_READ,
+    ) {
+        Ok(key) => key,
+        Err(_) => return Ok(false), // If we can't open the key, assume it's not enabled
+    };
+
+    match run_key.get_value::<String, _>("NASBootClient") {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
     }
 }
 
-async fn send_heartbeat(config: &Config) {
-    let client = reqwest::Client::new();
-    let timestamp = Local::now().to_rfc3339();
-    let hostname = hostname::get()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+fn show_balloon_tip(title: &str, message: &str) {
+    // This is a stub implementation
+    // A real implementation would use Shell_NotifyIcon with a proper window handle
 
-    info!("Sending heartbeat from {hostname}");
-
-    match client
-        .post(&config.heartbeat_url)
-        .json(&serde_json::json!({
-            "timestamp": timestamp,
-            "hostname": hostname
-        }))
-        .timeout(Duration::from_secs(config.heartbeat_timeout_secs))
-        .send()
-        .await
-    {
-        Ok(response) => {
-            if response.status().is_success() {
-                info!("Heartbeat sent successfully to {}", config.heartbeat_url);
-            } else {
-                error!("Heartbeat failed with status: {}", response.status());
-            }
-        }
-        Err(e) => error!("Failed to send heartbeat: {e}"),
-    }
+    // Log the notification since we're not actually showing it
+    info!("NOTIFICATION - {title}: {message}");
 }

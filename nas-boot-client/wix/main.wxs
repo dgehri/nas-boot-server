@@ -37,9 +37,6 @@
         <Property Id='DiskPrompt' Value='NAS Boot Client Installation' />
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
-            <!-- Add System32 directory reference -->
-            <Directory Id='SystemFolder' Name='System32' />
-            
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='NAS Boot Client'>
                     <Component Id='License' Guid='*'>
@@ -50,7 +47,6 @@
                     </Component>
 
                     <Directory Id='Bin' Name='bin'>
-
                         <Component Id='binary0' Guid='*'>
                             <File
                                 Id='exe0'
@@ -58,31 +54,50 @@
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\nas-boot-client.exe'
                                 KeyPath='yes' />
-
-                            <!-- Service installation with LocalSystem account -->
-                            <ServiceInstall
-                                Id="ServiceInstaller"
-                                Type="ownProcess"
-                                Name="NASBootClient"
-                                DisplayName="NAS Boot Client"
-                                Description="Monitors user activity and manages NAS power state"
-                                Start="auto"
-                                ErrorControl="normal"
-                                Account="LocalSystem">
-                            </ServiceInstall>
-
-                            <!-- Service control with proper shutdown handling -->
-                            <ServiceControl
-                                Id="StartService"
-                                Start="install"
-                                Stop="both"
-                                Remove="uninstall"
-                                Name="NASBootClient"
-                                Wait="yes" />
+                                
+                            <!-- Add shortcut to the startup folder for current user autostart -->
+                            <Shortcut Id="StartupShortcut" 
+                                      Directory="StartupFolder" 
+                                      Name="NAS Boot Client"
+                                      WorkingDirectory="APPLICATIONFOLDER"
+                                      Icon="app_icon.ico"
+                                      IconIndex="0"
+                                      Advertise="yes" />
+                                      
+                            <!-- Add shortcut to the start menu -->
+                            <Shortcut Id="StartMenuShortcut" 
+                                      Directory="ProgramMenuDir" 
+                                      Name="NAS Boot Client"
+                                      WorkingDirectory="APPLICATIONFOLDER"
+                                      Icon="app_icon.ico"
+                                      IconIndex="0"
+                                      Advertise="yes" />
                         </Component>
                     </Directory>
+                    
+                    <!-- Icons that will be included in the installer -->
+                    <Component Id='AppIcons' Guid='*'>
+                        <File Id='app_icon.ico'
+                            Name='app-icon.ico'
+                            DiskId='1'
+                            Source='assets\app-icon.ico'
+                            KeyPath='yes' />
+                    </Component>
                 </Directory>
             </Directory>
+            
+            <!-- Add Start Menu Directory -->
+            <Directory Id="ProgramMenuFolder" Name="Programs">
+                <Directory Id="ProgramMenuDir" Name="NAS Boot Client">
+                    <Component Id="ProgramMenuDir" Guid="*">
+                        <RemoveFolder Id='ProgramMenuDir' On='uninstall' />
+                        <RegistryValue Root='HKCU' Key='Software\[Manufacturer]\[ProductName]' Type='string' Value='' KeyPath='yes' />
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <!-- Add Startup Folder for auto-start -->
+            <Directory Id="StartupFolder" Name="StartupFolder" />
 
             <!-- Add configuration directory in user profile -->
             <Directory Id="CommonAppDataFolder" Name="ProgramData">
@@ -107,25 +122,10 @@
             </Directory>
         </Directory>
 
-        <!-- Custom actions for service management with elevated privileges -->
-        <CustomAction Id="StopServiceAction"
-            Directory="SystemFolder"
-            ExeCommand="cmd.exe /c &quot;net stop NASBootClient 2&gt;nul || sc stop NASBootClient 2&gt;nul || echo Service already stopped&quot;"
-            Execute="deferred"
-            Impersonate="no"
-            Return="ignore" />
-
-        <CustomAction Id="RemoveServiceAction"
-            Directory="SystemFolder"
-            ExeCommand="cmd.exe /c &quot;sc delete NASBootClient 2&gt;nul || echo Service already removed&quot;"
-            Execute="deferred"
-            Impersonate="no"
-            Return="ignore" />
-
         <Feature
             Id='Complete'
             Title='NAS Boot Client'
-            Description='Installs the NAS Boot Client service.'
+            Description='Installs the NAS Boot Client application.'
             Level='1'
             ConfigurableDirectory='APPLICATIONFOLDER'
             AllowAdvertise='no'
@@ -134,17 +134,14 @@
 
             <ComponentRef Id='License' />
             <ComponentRef Id='binary0' />
+            <ComponentRef Id='AppIcons' />
             <ComponentRef Id='ConfigFolder' />
+            <ComponentRef Id='ProgramMenuDir' />
         </Feature>
 
-        <!-- Updated InstallExecuteSequence with proper sequencing for deferred actions -->
-        <InstallExecuteSequence>
-            <!-- Stop service before standard service control actions -->
-            <Custom Action="StopServiceAction" After="StopServices">REMOVE="ALL"</Custom>
-            
-            <!-- Remove service after stopping -->
-            <Custom Action="RemoveServiceAction" After="StopServiceAction">REMOVE="ALL"</Custom>
-        </InstallExecuteSequence>
+        <!-- Use application icon for installer -->
+        <Icon Id="app_icon.ico" SourceFile="assets\app-icon.ico" />
+        <Property Id="ARPPRODUCTICON" Value="app_icon.ico" />
 
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize' />
 
