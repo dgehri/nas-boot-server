@@ -10,9 +10,10 @@ use tokio::sync::mpsc;
 use tokio::time;
 use tray_item::{IconSource, TrayItem};
 use wake_on_lan::MagicPacket;
-use winapi::um::sysinfoapi::GetTickCount;
-use winapi::um::winuser::{GetLastInputInfo, LASTINPUTINFO};
-use winapi::um::winuser::{ShowWindow, SW_HIDE, SW_SHOW, GetForegroundWindow};
+use windows::Win32::System::Console::GetConsoleWindow;
+use windows::Win32::System::SystemInformation::{GetTickCount, LASTINPUTINFO};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetLastInputInfo;
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW};
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
 use yaml_rust2::YamlLoader;
@@ -88,8 +89,8 @@ struct App {
     state: Option<AppState>,
     config: Config,
     last_heartbeat: Instant,
-    console_window: Option<winapi::shared::windef::HWND>,
-    main_window: Option<winapi::shared::windef::HWND>,
+    console_window: Option<windows::Win32::Foundation::HWND>,
+    main_window: Option<windows::Win32::Foundation::HWND>,
     window_visible: bool,
 }
 
@@ -146,8 +147,8 @@ impl App {
             state: None,
             config,
             last_heartbeat: Instant::now(),
-            console_window: if console_window.is_null() { None } else { Some(console_window) },
-            main_window: if main_window.is_null() { None } else { Some(main_window) },
+            console_window: if console_window.is_invalid() { None } else { Some(console_window) },
+            main_window: if main_window.is_invalid() { None } else { Some(main_window) },
             window_visible: true,
         };
 
@@ -552,10 +553,9 @@ heartbeat_timeout_secs: {}
 
 fn run_app() -> Result<()> {
     // Hide the console window early
-    if let Some(hwnd) = unsafe { GetConsoleWindow() } {
-        if !hwnd.is_null() {
-            unsafe { ShowWindow(hwnd, SW_HIDE); }
-        }
+    let console_window = unsafe { GetConsoleWindow() };
+    if !console_window.is_invalid() {
+        unsafe { ShowWindow(console_window, SW_HIDE); }
     }
 
     // Load configuration
@@ -606,7 +606,7 @@ fn is_user_active(idle_threshold_mins: u32) -> bool {
     // Get the last input info
     let result = unsafe { GetLastInputInfo(&mut last_input_info) };
 
-    if result == 0 {
+    if result.as_bool() == false {
         error!("Failed to get last input info");
         return true; // Assume user is active if we can't determine
     }
