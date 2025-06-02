@@ -1,0 +1,9 @@
+[toolchain]
+components = ["rustfmt", "clippy"]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-musl",
+]
+
+[tools]
+cargo-wix = "0.3.9"

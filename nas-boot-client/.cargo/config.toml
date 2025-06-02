@@ -1,0 +1,10 @@
+authors = ["NAS Boot Client <info@nasboot.com>"]
+description = "NAS Boot Client - Monitors user activity to control NAS power"
+license = "MIT"
+repository = "https://github.com/example/nas-boot-client"
+homepage = "https://example.com/nas-boot"
+
+[wix]
+license = "wix/License.rtf"
+product-name = "NAS Boot Client"
+product-icon = "wix/product-icon.ico"
