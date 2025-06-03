@@ -270,6 +270,19 @@ impl eframe::App for NasBootGui {
         // Request repaint once per second
         ctx.request_repaint_after(Duration::from_secs(1));
     }
+    
+    // Override the on_close_event to hide to tray instead of closing the app
+    fn on_close_event(&mut self) -> bool {
+        // Access the saved context
+        if let Some(ctx) = &self.egui_ctx {
+            log::info!("Close button clicked, hiding to tray instead of exiting");
+            self.hide_to_tray(ctx);
+            false // Return false to prevent the window from closing
+        } else {
+            log::error!("No egui context available, allowing default close behavior");
+            true // Allow the window to close normally if we don't have a context
+        }
+    }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         debug!("Exiting NAS Boot Client GUI");
