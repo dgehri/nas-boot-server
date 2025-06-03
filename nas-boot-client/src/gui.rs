@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::time;
 use tray_item::{IconSource, TrayItem};
-use raw_window_handle::HasWindowHandle;
 
 pub struct NasBootGui {
     config: Config,
@@ -22,7 +21,7 @@ pub struct NasBootGui {
     runtime: Runtime,
     window_visible: bool,
     tray_item: Option<TrayItem>,
-    window: Option<Arc<winit::window::Window>>,
+    egui_ctx: Option<egui::Context>,
 }
 
 impl NasBootGui {
@@ -34,8 +33,8 @@ impl NasBootGui {
     ) -> Self {
         let auto_start_enabled = is_auto_start_enabled().unwrap_or(false);
         
-        // Store the window handle for direct manipulation
-        let window = cc.integration_info.window.clone();
+        // Store the egui context for viewport commands
+        let egui_ctx = Some(cc.egui_ctx.clone());
 
         Self {
             config,
@@ -46,7 +45,7 @@ impl NasBootGui {
             runtime: Runtime::new().expect("Failed to create Tokio runtime"),
             window_visible: true,
             tray_item: None,
-            window,
+            egui_ctx,
         }
     }
 
@@ -79,25 +78,28 @@ impl NasBootGui {
         if self.tray_item.is_none() {
             let mut tray = TrayItem::new("NAS Boot Client", IconSource::Resource("nas_black_ico"))?;
 
-            // Add "Show Window" menu item using direct window access
-            if let Some(window) = self.window.clone() {
+            // Add "Show Window" menu item using captured egui context
+            if let Some(egui_ctx) = self.egui_ctx.clone() {
                 tray.add_menu_item("Show Window", move || {
                     log::info!("Showing main window from tray");
-                    window.set_visible(true);
-                    window.focus_window();
-                    window.request_redraw();
+                    // This is a workaround for the issue #3655
+                    // First send visible command
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    // Then force repaint and focus
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    egui_ctx.request_repaint();
                 })?;
             }
 
-            // Add "Exit" menu item using direct window access
-            if let Some(window) = self.window.clone() {
+            // Add "Exit" menu item using captured egui context
+            if let Some(egui_ctx) = self.egui_ctx.clone() {
                 tray.add_menu_item("Exit", move || {
                     log::info!("Exiting application from tray");
-                    window.set_visible(true); // Make visible first to ensure the close event is processed
-                    window.request_redraw();
-                    window.request_user_attention(Some(winit::window::UserAttentionType::Critical));
-                    window.set_minimized(false);
-                    window.close();
+                    // Make visible first to ensure the close event is processed
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    // Force repaint and close
+                    egui_ctx.request_repaint();
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 })?;
             }
 
@@ -125,7 +127,12 @@ impl NasBootGui {
 }
 
 impl eframe::App for NasBootGui {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+        // Store ctx reference if not already stored
+        if self.egui_ctx.is_none() {
+            self.egui_ctx = Some(ctx.clone());
+        }
+        
         // Set up tray icon if not already done
         if self.tray_item.is_none() {
             if let Err(e) = self.setup_tray(ctx) {
@@ -217,14 +224,10 @@ impl eframe::App for NasBootGui {
 
             // Hide to tray button - still using viewport command for this
             if ui.button("Hide to Tray").clicked() {
-                if let Some(window) = &self.window {
-                    log::info!("Hiding window to tray");
-                    window.set_visible(false);
-                    self.window_visible = false;
-                } else {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    self.window_visible = false;
-                }
+                log::info!("Hiding window to tray");
+                // Use frame's close/hide API if available in the future
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.window_visible = false;
             }
         });
 
