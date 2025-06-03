@@ -14,6 +14,7 @@ mod gui;
 mod nas;
 mod system;
 mod user_activity;
+mod wol;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
