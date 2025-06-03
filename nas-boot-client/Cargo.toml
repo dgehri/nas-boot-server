@@ -23,8 +23,19 @@ serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 wake-on-lan = "0.2"
 tray-item = "0.10.0"
-winapi = { version = "0.3.9", features = ["winuser", "sysinfoapi", "shellapi"] }
-winreg = "0.50.0"
+windows = { version = "0.61.1", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input",
+    "Win32_UI_WindowsAndMessaging",
+] }
+winreg = "0.55.0"
 yaml-rust2 = "0.10.2"
 
 [build-dependencies]

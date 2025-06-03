@@ -11,8 +11,8 @@ use tokio::time;
 use tray_item::{IconSource, TrayItem};
 use wake_on_lan::MagicPacket;
 use windows::Win32::System::Console::GetConsoleWindow;
-use windows::Win32::System::SystemInformation::{GetTickCount, LASTINPUTINFO};
-use windows::Win32::UI::Input::KeyboardAndMouse::GetLastInputInfo;
+use windows::Win32::System::SystemInformation::GetTickCount;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW};
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
@@ -99,14 +99,14 @@ impl App {
         // Get the console window handle if it exists
         let console_window = unsafe { GetConsoleWindow() };
         let main_window = unsafe { GetForegroundWindow() };
-        
+
         // Set up the tray icon
         let mut tray = TrayItem::new("NAS Boot Client", IconSource::Resource("nas_black_ico"))
             .context("Failed to create tray icon")?;
 
         // Create a channel for message passing
         let (tx, rx) = mpsc::channel(100);
-        
+
         // Status menu item
         let tx_clone = tx.clone();
         tray.add_menu_item("Show Status", move || {
@@ -147,8 +147,16 @@ impl App {
             state: None,
             config,
             last_heartbeat: Instant::now(),
-            console_window: if console_window.is_invalid() { None } else { Some(console_window) },
-            main_window: if main_window.is_invalid() { None } else { Some(main_window) },
+            console_window: if console_window.is_invalid() {
+                None
+            } else {
+                Some(console_window)
+            },
+            main_window: if main_window.is_invalid() {
+                None
+            } else {
+                Some(main_window)
+            },
             window_visible: true,
         };
 
@@ -158,7 +166,7 @@ impl App {
     async fn run(mut self, mut rx: mpsc::Receiver<Message>) -> Result<()> {
         // Hide window by default at startup
         self.hide_window();
-        
+
         // Set up state check interval
         let mut interval = time::interval(Duration::from_secs(self.config.check_interval_secs));
 
@@ -242,36 +250,44 @@ impl App {
         }
         .context("Failed to update tray icon")
     }
-    
+
     fn show_window(&mut self) {
         if !self.window_visible {
             // Show the console window if it exists
             if let Some(hwnd) = self.console_window {
-                unsafe { ShowWindow(hwnd, SW_SHOW); }
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                }
             }
-            
+
             // Show the main window if it exists
             if let Some(hwnd) = self.main_window {
-                unsafe { ShowWindow(hwnd, SW_SHOW); }
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                }
             }
-            
+
             self.window_visible = true;
             info!("Showed application window");
         }
     }
-    
+
     fn hide_window(&mut self) {
         if self.window_visible {
             // Hide the console window if it exists
             if let Some(hwnd) = self.console_window {
-                unsafe { ShowWindow(hwnd, SW_HIDE); }
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
             }
-            
+
             // Hide the main window if it exists
             if let Some(hwnd) = self.main_window {
-                unsafe { ShowWindow(hwnd, SW_HIDE); }
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
             }
-            
+
             self.window_visible = false;
             info!("Hid application window");
         }
@@ -555,7 +571,9 @@ fn run_app() -> Result<()> {
     // Hide the console window early
     let console_window = unsafe { GetConsoleWindow() };
     if !console_window.is_invalid() {
-        unsafe { ShowWindow(console_window, SW_HIDE); }
+        unsafe {
+            let _ = ShowWindow(console_window, SW_HIDE);
+        }
     }
 
     // Load configuration
@@ -575,7 +593,7 @@ fn run_app() -> Result<()> {
 fn run_app_with_console() -> Result<()> {
     // In console mode, we don't hide the console window initially
     // but still allow it to be toggled via the tray menu
-    
+
     // Load configuration
     let config = load_config()?;
 

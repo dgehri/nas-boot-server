@@ -60,7 +60,7 @@
                                       Directory="StartupFolder" 
                                       Name="NAS Boot Client"
                                       WorkingDirectory="APPLICATIONFOLDER"
-                                      Icon="app_icon.ico"
+                                      Icon="nas_black.ico"
                                       IconIndex="0"
                                       Advertise="yes" />
                                       
@@ -69,7 +69,7 @@
                                       Directory="ProgramMenuDir" 
                                       Name="NAS Boot Client"
                                       WorkingDirectory="APPLICATIONFOLDER"
-                                      Icon="app_icon.ico"
+                                      Icon="nas_black.ico"
                                       IconIndex="0"
                                       Advertise="yes" />
                         </Component>
@@ -77,10 +77,10 @@
                     
                     <!-- Icons that will be included in the installer -->
                     <Component Id='AppIcons' Guid='*'>
-                        <File Id='app_icon.ico'
-                            Name='app-icon.ico'
+                        <File Id='nas_black.ico'
+                            Name='nas_black.ico'
                             DiskId='1'
-                            Source='assets\app-icon.ico'
+                            Source='assets\nas_black.ico'
                             KeyPath='yes' />
                     </Component>
                 </Directory>
