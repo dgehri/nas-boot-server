@@ -1,7 +1,7 @@
 use crate::app::AppState;
 use crate::config::Config;
 use crate::nas::{send_heartbeat, wake_nas};
-use crate::system::{is_auto_start_enabled, set_auto_start};
+use crate::system::{is_auto_start_enabled, set_auto_start, find_app_window, show_window, close_window};
 use crate::user_activity::is_user_active;
 use anyhow::Result;
 use eframe::{egui, Frame};
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::time;
 use tray_item::{IconSource, TrayItem};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct NasBootGui {
     config: Config,
@@ -19,7 +20,7 @@ pub struct NasBootGui {
     auto_start_enabled: bool,
     last_check_time: Instant,
     runtime: Runtime,
-    window_visible: bool,
+    window_visible: Arc<AtomicBool>,
     tray_item: Option<TrayItem>,
     egui_ctx: Option<egui::Context>,
 }
@@ -30,6 +31,7 @@ impl NasBootGui {
         config: Config,
         shared_state: Arc<Mutex<AppState>>,
         last_heartbeat: Arc<Mutex<Instant>>,
+        window_visible: Arc<AtomicBool>,
     ) -> Self {
         let auto_start_enabled = is_auto_start_enabled().unwrap_or(false);
         
@@ -43,7 +45,7 @@ impl NasBootGui {
             auto_start_enabled,
             last_check_time: Instant::now(),
             runtime: Runtime::new().expect("Failed to create Tokio runtime"),
-            window_visible: true,
+            window_visible,
             tray_item: None,
             egui_ctx,
         }
@@ -74,34 +76,40 @@ impl NasBootGui {
         }
     }
 
-    fn setup_tray(&mut self, ctx: &egui::Context) -> Result<()> {
+    fn setup_tray(&mut self, _ctx: &egui::Context) -> Result<()> {
         if self.tray_item.is_none() {
             let mut tray = TrayItem::new("NAS Boot Client", IconSource::Resource("nas_black_ico"))?;
 
-            // Add "Show Window" menu item using captured egui context
-            if let Some(egui_ctx) = self.egui_ctx.clone() {
-                tray.add_menu_item("Show Window", move || {
-                    log::info!("Showing main window from tray");
-                    // This is a workaround for the issue #3655
-                    // First send visible command
-                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    // Then force repaint and focus
-                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    egui_ctx.request_repaint();
-                })?;
-            }
+            // Add "Show Window" menu item using Win32 API directly
+            let window_visible = self.window_visible.clone();
+            tray.add_menu_item("Show Window", move || {
+                log::info!("Showing main window from tray using Win32 API");
+                if let Ok(hwnd) = find_app_window() {
+                    if show_window(hwnd).is_ok() {
+                        window_visible.store(true, Ordering::SeqCst);
+                        log::info!("Window successfully shown");
+                    } else {
+                        log::error!("Failed to show window");
+                    }
+                } else {
+                    log::error!("Could not find application window");
+                }
+            })?;
 
-            // Add "Exit" menu item using captured egui context
-            if let Some(egui_ctx) = self.egui_ctx.clone() {
-                tray.add_menu_item("Exit", move || {
-                    log::info!("Exiting application from tray");
-                    // Make visible first to ensure the close event is processed
-                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    // Force repaint and close
-                    egui_ctx.request_repaint();
-                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                })?;
-            }
+            // Add "Exit" menu item using Win32 API directly
+            tray.add_menu_item("Exit", || {
+                log::info!("Exiting application from tray using Win32 API");
+                if let Ok(hwnd) = find_app_window() {
+                    let _ = show_window(hwnd); // Show window first to ensure it can process close message
+                    if let Err(e) = close_window(hwnd) {
+                        log::error!("Failed to close window: {:?}", e);
+                        std::process::exit(0); // Force exit if message sending fails
+                    }
+                } else {
+                    log::error!("Could not find application window, forcing exit");
+                    std::process::exit(0);
+                }
+            })?;
 
             // Update tray icon based on current state
             self.update_tray_icon()?;
@@ -127,7 +135,7 @@ impl NasBootGui {
 }
 
 impl eframe::App for NasBootGui {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         // Store ctx reference if not already stored
         if self.egui_ctx.is_none() {
             self.egui_ctx = Some(ctx.clone());
@@ -222,12 +230,12 @@ impl eframe::App for NasBootGui {
 
             ui.add_space(10.0);
 
-            // Hide to tray button - still using viewport command for this
+            // Hide to tray button using a combination of viewport commands and our state tracking
             if ui.button("Hide to Tray").clicked() {
                 log::info!("Hiding window to tray");
-                // Use frame's close/hide API if available in the future
+                // Hide using viewport command first (works for the current window)
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.window_visible = false;
+                self.window_visible.store(false, Ordering::SeqCst);
             }
         });
 
@@ -246,6 +254,7 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     // Create shared state objects
     let app_state = Arc::new(Mutex::new(AppState::Unknown));
     let last_heartbeat = Arc::new(Mutex::new(Instant::now()));
+    let window_visible = Arc::new(AtomicBool::new(true));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -260,13 +269,14 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     let config_clone = config.clone();
     let app_state_clone = app_state.clone();
     let last_heartbeat_clone = last_heartbeat.clone();
+    let window_visible_clone = window_visible.clone();
 
-    // Start background task in its own thread
+    // Start background task in its own thread - this will continue running even when window is hidden
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             if let Err(e) =
-                run_background_tasks(config_clone, app_state_clone, last_heartbeat_clone).await
+                run_background_tasks(config_clone, app_state_clone, last_heartbeat_clone, window_visible_clone).await
             {
                 log::error!("Background task error: {}", e);
             }
@@ -276,7 +286,7 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     eframe::run_native(
         "NAS Boot Client",
         options,
-        Box::new(move |cc| Box::new(NasBootGui::new(cc, config, app_state, last_heartbeat))),
+        Box::new(move |cc| Box::new(NasBootGui::new(cc, config, app_state, last_heartbeat, window_visible))),
     )
     .map_err(|e| anyhow::anyhow!("Failed to start GUI: {}", e))?;
 
@@ -287,6 +297,7 @@ pub async fn run_background_tasks(
     config: Config,
     app_state: Arc<Mutex<AppState>>,
     last_heartbeat: Arc<Mutex<Instant>>,
+    window_visible: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(config.check_interval_secs));
 
