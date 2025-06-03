@@ -5,7 +5,6 @@ use std::time::Duration;
 use wake_on_lan::MagicPacket;
 
 use crate::config::Config;
-use crate::system::show_balloon_tip;
 
 pub async fn wake_nas(config: &Config) {
     // Parse MAC address

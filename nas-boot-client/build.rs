@@ -23,7 +23,7 @@ fn main() -> io::Result<()> {
                 }
             }
 
-            tinted.save(format!("assets/nas_{}.ico", name)).unwrap();
+            tinted.save(format!("assets/nas_{name}.ico")).unwrap();
         }
 
         WindowsResource::new()

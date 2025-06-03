@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use log::info;
-use serde::de;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time;
@@ -10,9 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use crate::config::Config;
 use crate::nas::{send_heartbeat, wake_nas};
-use crate::system::{
-    hide_window, is_auto_start_enabled, set_auto_start, show_balloon_tip, show_window,
-};
+use crate::system::{hide_window, is_auto_start_enabled, set_auto_start, show_window};
 use crate::user_activity::is_user_active;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -288,17 +285,6 @@ impl App {
                 "enabled"
             }
         );
-        show_balloon_tip(
-            "Auto-start Setting",
-            &format!(
-                "Auto-start has been {}",
-                if auto_start_enabled {
-                    "disabled"
-                } else {
-                    "enabled"
-                }
-            ),
-        );
         Ok(())
     }
 
@@ -323,7 +309,8 @@ impl App {
             }
         );
 
-        show_balloon_tip("NAS Boot Client", &message);
+        info!("{}", message);
+
         Ok(())
     }
 }

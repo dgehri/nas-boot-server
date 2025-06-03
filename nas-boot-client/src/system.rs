@@ -66,6 +66,7 @@ pub fn hide_window_console() {
     }
 }
 
+#[allow(dead_code)]
 pub fn show_window_console() {
     let console_window = unsafe { GetConsoleWindow() };
     if !console_window.is_invalid() {
