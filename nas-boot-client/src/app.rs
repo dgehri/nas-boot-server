@@ -16,9 +16,18 @@ use crate::user_activity::is_user_active;
 pub enum AppState {
     #[default]
     Unknown,
-    Active,
+
+    /// User is idle
     Idle,
-    NoNas,
+    
+    /// User is active but NAS is not connected
+    Active,
+    
+    /// No NAS connection or NAS is unreachable
+    NoNas, // To remove
+
+    /// NAS is available and user is active
+    NasAvailable,
 }
 
 #[derive(Debug)]
@@ -117,9 +126,6 @@ impl App {
     }
 
     pub async fn run(mut self, mut rx: mpsc::Receiver<Message>) -> Result<()> {
-        // Hide window by default at startup
-        self.hide_window();
-
         // Set up state check interval
         let mut interval = time::interval(Duration::from_secs(self.config.check_interval_secs));
 
@@ -209,6 +215,8 @@ impl App {
     async fn send_heartbeat_and_update_state(&mut self) {
         let result = send_heartbeat(&self.config).await;
         self.last_heartbeat = Instant::now();
+
+        log::debug!("Heartbeat result: {:?}", result);
 
         // Update state based on heartbeat result
         match result {
