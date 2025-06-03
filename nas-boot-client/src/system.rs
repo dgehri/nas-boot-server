@@ -45,14 +45,6 @@ pub fn is_auto_start_enabled() -> Result<bool> {
     }
 }
 
-pub fn show_balloon_tip(title: &str, message: &str) {
-    // This is a stub implementation
-    // A real implementation would use Shell_NotifyIcon with a proper window handle
-
-    // Log the notification since we're not actually showing it
-    info!("NOTIFICATION - {title}: {message}");
-}
-
 pub fn show_window(hwnd: HWND) {
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Local;
-use log::{error, info};
+use log::{error, info, warn};
 use std::time::Duration;
 use wake_on_lan::MagicPacket;
 
@@ -28,16 +28,15 @@ pub async fn wake_nas(config: &Config) {
         match MagicPacket::new(&mac).send() {
             Ok(()) => {
                 info!("Sent WOL packet to NAS");
-                show_balloon_tip("NAS Boot Client", "Waking up NAS...");
             }
-            Err(e) => error!("Failed to send WOL packet: {e}"),
+            Err(e) => warn!("Failed to send WOL packet: {e}"),
         }
 
         // Send via router
         let router_addr = format!("{}:9", config.router_ip);
         match MagicPacket::new(&mac).send_to(&router_addr as &str, "0.0.0.0:0") {
             Ok(()) => info!("Sent WOL packet via router"),
-            Err(e) => error!("Failed to send WOL packet via router: {e}"),
+            Err(e) => warn!("Failed to send WOL packet via router: {e}"),
         }
     } else {
         error!("Invalid MAC address format");
@@ -74,7 +73,7 @@ pub async fn send_heartbeat(config: &Config) -> Result<bool> {
             }
         }
         Err(e) => {
-            error!("Failed to send heartbeat: {e}");
+            warn!("Failed to send heartbeat: {e}");
             Err(anyhow::anyhow!("Failed to send heartbeat: {}", e))
         }
     }

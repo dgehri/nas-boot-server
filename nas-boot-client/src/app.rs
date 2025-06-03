@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use log::info;
+use serde::de;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time;
@@ -14,8 +15,10 @@ use crate::system::{
 };
 use crate::user_activity::is_user_active;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AppState {
+    #[default]
+    Unknown,
     Active,
     Idle,
     NoNas,
@@ -35,7 +38,7 @@ pub enum Message {
 pub struct App {
     tray: TrayItem,
     tx: mpsc::Sender<Message>,
-    state: Option<AppState>,
+    state: AppState,
     config: Config,
     last_heartbeat: Instant,
     console_window: Option<windows::Win32::Foundation::HWND>,
@@ -90,22 +93,26 @@ impl App {
         })
         .context("Failed to add quit menu item")?;
 
+        let console_window = if console_window.is_invalid() {
+            None
+        } else {
+            Some(console_window)
+        };
+
+        let main_window = if main_window.is_invalid() {
+            None
+        } else {
+            Some(main_window)
+        };
+
         let app = Self {
             tray,
             tx,
-            state: None,
+            state: AppState::Unknown,
             config,
             last_heartbeat: Instant::now(),
-            console_window: if console_window.is_invalid() {
-                None
-            } else {
-                Some(console_window)
-            },
-            main_window: if main_window.is_invalid() {
-                None
-            } else {
-                Some(main_window)
-            },
+            console_window,
+            main_window,
             window_visible: true,
         };
 
@@ -120,7 +127,7 @@ impl App {
         let mut interval = time::interval(Duration::from_secs(self.config.check_interval_secs));
 
         // Set up heartbeat state
-        let mut last_active = true;
+        let mut was_active = true;
 
         info!("App started, waiting for messages");
 
@@ -138,11 +145,11 @@ impl App {
                             break;
                         }
                         Message::CheckState => {
-                            last_active = self.check_state(last_active).await?;
+                            was_active = self.check_state(was_active).await?;
                         }
                         Message::StateChanged(new_state) => {
                             info!("State changed from {:?} to {:?}", self.state, new_state);
-                            self.state = Some(new_state);
+                            self.state = new_state;
                             self.update_tray_icon()?;
                         }
                         Message::ToggleAutoStart => {
@@ -167,29 +174,27 @@ impl App {
     }
 
     // Checks the current state and handles activity changes
-    async fn check_state(&mut self, last_active: bool) -> Result<bool> {
+    async fn check_state(&mut self, was_active: bool) -> Result<bool> {
         let is_active = is_user_active(self.config.idle_threshold_mins);
-        
+
         // Update app state if needed
         let new_state = if is_active {
-            Some(AppState::Active)
+            AppState::Active
         } else {
-            Some(AppState::Idle)
+            AppState::Idle
         };
 
         if new_state != self.state {
-            if let Some(new_state) = new_state {
-                self.tx.send(Message::StateChanged(new_state)).await?;
-            }
+            self.tx.send(Message::StateChanged(new_state)).await?;
         }
 
         // Handle active user state
         if is_active {
             // Handle wake actions if user just became active
-            if !last_active {
+            if !was_active {
                 self.handle_user_activation().await;
             }
-            
+
             // Send heartbeat and update NAS connection state
             self.send_heartbeat_and_update_state().await;
         }
@@ -207,17 +212,23 @@ impl App {
     async fn send_heartbeat_and_update_state(&mut self) {
         let result = send_heartbeat(&self.config).await;
         self.last_heartbeat = Instant::now();
-        
+
         // Update state based on heartbeat result
         match result {
             Ok(true) => {
-                if self.state == Some(AppState::NoNas) {
-                    self.tx.send(Message::StateChanged(AppState::Active)).await.ok();
+                if self.state == AppState::NoNas {
+                    self.tx
+                        .send(Message::StateChanged(AppState::Active))
+                        .await
+                        .ok();
                 }
-            },
+            }
             Ok(false) | Err(_) => {
-                if self.state != Some(AppState::NoNas) {
-                    self.tx.send(Message::StateChanged(AppState::NoNas)).await.ok();
+                if self.state != AppState::NoNas {
+                    self.tx
+                        .send(Message::StateChanged(AppState::NoNas))
+                        .await
+                        .ok();
                 }
             }
         }
@@ -225,10 +236,10 @@ impl App {
 
     fn update_tray_icon(&mut self) -> Result<()> {
         match self.state {
-            Some(AppState::Active) => self.tray.set_icon(IconSource::Resource("nas_green_ico")),
-            Some(AppState::Idle) => self.tray.set_icon(IconSource::Resource("nas_black_ico")),
-            Some(AppState::NoNas) => self.tray.set_icon(IconSource::Resource("nas_red_ico")),
-            None => self.tray.set_icon(IconSource::Resource("nas_black_ico")),
+            AppState::Active => self.tray.set_icon(IconSource::Resource("nas_green_ico")),
+            AppState::Idle => self.tray.set_icon(IconSource::Resource("nas_yellow_ico")),
+            AppState::NoNas => self.tray.set_icon(IconSource::Resource("nas_red_ico")),
+            AppState::Unknown => self.tray.set_icon(IconSource::Resource("nas_gray_ico")),
         }
         .context("Failed to update tray icon")
     }
@@ -298,7 +309,7 @@ impl App {
              Current state: {:?}\n\
              Last activity check: {}s ago\n\
              Auto-start: {}",
-            if self.state == Some(AppState::NoNas) {
+            if self.state == AppState::NoNas {
                 "Disconnected"
             } else {
                 "Connected"
@@ -313,7 +324,6 @@ impl App {
         );
 
         show_balloon_tip("NAS Boot Client", &message);
-        info!("Displayed status message");
         Ok(())
     }
 }
