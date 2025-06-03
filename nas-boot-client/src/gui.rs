@@ -1,17 +1,19 @@
 use crate::app::AppState;
 use crate::config::Config;
 use crate::nas::{send_heartbeat, wake_nas};
-use crate::system::{is_auto_start_enabled, set_auto_start, find_app_window, show_window, close_window, hide_window};
+use crate::system::{
+    close_window, find_app_window, hide_window, is_auto_start_enabled, set_auto_start, show_window,
+};
 use crate::user_activity::is_user_active;
 use anyhow::Result;
 use eframe::{egui, Frame};
-use log::{debug, info};
+use log::info;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::time;
 use tray_item::{IconSource, TrayItem};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct NasBootGui {
     config: Config,
@@ -23,6 +25,7 @@ pub struct NasBootGui {
     window_visible: Arc<AtomicBool>,
     tray_item: Option<TrayItem>,
     egui_ctx: Option<egui::Context>,
+    exit: Arc<AtomicBool>,
 }
 
 impl NasBootGui {
@@ -34,7 +37,7 @@ impl NasBootGui {
         window_visible: Arc<AtomicBool>,
     ) -> Self {
         let auto_start_enabled = is_auto_start_enabled().unwrap_or(false);
-        
+
         // Store the egui context for viewport commands
         let egui_ctx = Some(cc.egui_ctx.clone());
 
@@ -48,6 +51,7 @@ impl NasBootGui {
             window_visible,
             tray_item: None,
             egui_ctx,
+            exit: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -89,7 +93,7 @@ impl NasBootGui {
                     if show_window(hwnd).is_ok() {
                         window_visible.store(true, Ordering::SeqCst);
                         log::info!("Window successfully shown");
-                        
+
                         // Also update egui state if possible
                         if let Some(ctx) = &egui_ctx {
                             log::info!("Sending viewport visible command");
@@ -105,8 +109,11 @@ impl NasBootGui {
             })?;
 
             // Add "Exit" menu item using Win32 API directly
-            tray.add_menu_item("Exit", || {
-                log::info!("Exiting application from tray using Win32 API");
+            let exit_clone = self.exit.clone();
+            tray.add_menu_item("Exit", move || {
+                log::info!("Exiting application");
+                exit_clone.store(true, Ordering::SeqCst);
+
                 if let Ok(hwnd) = find_app_window() {
                     let _ = show_window(hwnd); // Show window first to ensure it can process close message
                     if let Err(e) = close_window(hwnd) {
@@ -140,11 +147,11 @@ impl NasBootGui {
         }
         Ok(())
     }
-    
+
     // Helper method to hide window consistently using both approaches
     fn hide_to_tray(&self, ctx: &egui::Context) {
         log::info!("Hiding window to tray");
-        
+
         // First try the Win32 API approach
         if let Ok(hwnd) = find_app_window() {
             if let Err(e) = hide_window(hwnd) {
@@ -155,11 +162,11 @@ impl NasBootGui {
         } else {
             log::error!("Could not find application window for hiding");
         }
-        
+
         // Then use the egui approach as well for good measure
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         self.window_visible.store(false, Ordering::SeqCst);
-        
+
         // Force a repaint to apply changes
         ctx.request_repaint();
     }
@@ -171,12 +178,18 @@ impl eframe::App for NasBootGui {
         if self.egui_ctx.is_none() {
             self.egui_ctx = Some(ctx.clone());
         }
-        
+
         // Set up tray icon if not already done
         if self.tray_item.is_none() {
             if let Err(e) = self.setup_tray(ctx) {
                 log::error!("Failed to set up tray icon: {}", e);
             }
+        }
+
+        if ctx.input(|i| i.viewport().close_requested()) && !self.exit.load(Ordering::SeqCst) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            log::info!("Close requested, hiding to tray instead");
+            self.hide_to_tray(ctx);
         }
 
         // Check if we need to update the state (every second)
@@ -270,22 +283,8 @@ impl eframe::App for NasBootGui {
         // Request repaint once per second
         ctx.request_repaint_after(Duration::from_secs(1));
     }
-    
-    // Override the on_close_event to hide to tray instead of closing the app
-    fn on_close_event(&mut self) -> bool {
-        // Access the saved context
-        if let Some(ctx) = &self.egui_ctx {
-            log::info!("Close button clicked, hiding to tray instead of exiting");
-            self.hide_to_tray(ctx);
-            false // Return false to prevent the window from closing
-        } else {
-            log::error!("No egui context available, allowing default close behavior");
-            true // Allow the window to close normally if we don't have a context
-        }
-    }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        debug!("Exiting NAS Boot Client GUI");
         // Clean up resources if needed
         self.tray_item = None;
     }
@@ -316,8 +315,13 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            if let Err(e) =
-                run_background_tasks(config_clone, app_state_clone, last_heartbeat_clone, window_visible_clone).await
+            if let Err(e) = run_background_tasks(
+                config_clone,
+                app_state_clone,
+                last_heartbeat_clone,
+                window_visible_clone,
+            )
+            .await
             {
                 log::error!("Background task error: {}", e);
             }
@@ -327,7 +331,15 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     eframe::run_native(
         "NAS Boot Client",
         options,
-        Box::new(move |cc| Box::new(NasBootGui::new(cc, config, app_state, last_heartbeat, window_visible))),
+        Box::new(move |cc| {
+            Box::new(NasBootGui::new(
+                cc,
+                config,
+                app_state,
+                last_heartbeat,
+                window_visible,
+            ))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("Failed to start GUI: {}", e))?;
 
