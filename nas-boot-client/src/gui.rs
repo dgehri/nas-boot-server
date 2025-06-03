@@ -36,6 +36,7 @@ impl NasBootGui {
         shared_state: Arc<Mutex<AppState>>,
         last_heartbeat: Arc<Mutex<Instant>>,
         window_visible: Arc<AtomicBool>,
+        keep_nas_on: Arc<AtomicBool>,
     ) -> Self {
         let auto_start_enabled = is_auto_start_enabled().unwrap_or(false);
 
@@ -53,7 +54,7 @@ impl NasBootGui {
             tray_item: None,
             egui_ctx,
             exit: Arc::new(AtomicBool::new(false)),
-            keep_nas_on: Arc::new(AtomicBool::new(false)),
+            keep_nas_on,
         }
     }
 
@@ -61,7 +62,13 @@ impl NasBootGui {
         let state = *self.app_state.lock().unwrap();
         match state {
             AppState::Unknown => "Status: Unknown".to_string(),
-            AppState::UserIdle => "Status: User is idle".to_string(),
+            AppState::UserIdle => {
+                if self.keep_nas_on.load(Ordering::SeqCst) {
+                    "Status: User is idle (keeping NAS on)".to_string()
+                } else {
+                    "Status: User is idle".to_string()
+                }
+            },
             AppState::UserActive => {
                 "Status: User active, attempting to connect to NAS...".to_string()
             }
@@ -142,7 +149,14 @@ impl NasBootGui {
             let current_state = *self.app_state.lock().unwrap();
             match current_state {
                 AppState::Unknown => tray.set_icon(IconSource::Resource("nas_grey_ico"))?,
-                AppState::UserIdle => tray.set_icon(IconSource::Resource("nas_red_ico"))?,
+                AppState::UserIdle => {
+                    // Use yellow icon if keep_nas_on is active
+                    if self.keep_nas_on.load(Ordering::SeqCst) {
+                        tray.set_icon(IconSource::Resource("nas_yellow_ico"))?
+                    } else {
+                        tray.set_icon(IconSource::Resource("nas_red_ico"))?
+                    }
+                },
                 AppState::UserActive => tray.set_icon(IconSource::Resource("nas_yellow_ico"))?,
                 AppState::NasAvailable => tray.set_icon(IconSource::Resource("nas_green_ico"))?,
             }
@@ -308,6 +322,7 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     let app_state = Arc::new(Mutex::new(AppState::Unknown));
     let last_heartbeat = Arc::new(Mutex::new(Instant::now()));
     let window_visible = Arc::new(AtomicBool::new(true));
+    let keep_nas_on = Arc::new(AtomicBool::new(false));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -323,6 +338,7 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     let app_state_clone = app_state.clone();
     let last_heartbeat_clone = last_heartbeat.clone();
     let window_visible_clone = window_visible.clone();
+    let keep_nas_on_clone = keep_nas_on.clone();
 
     // Start background task in its own thread - this will continue running even when window is hidden
     std::thread::spawn(move || {
@@ -333,6 +349,7 @@ pub fn run_gui_app(config: Config) -> Result<()> {
                 app_state_clone,
                 last_heartbeat_clone,
                 window_visible_clone,
+                keep_nas_on_clone,
             )
             .await
             {
@@ -351,6 +368,7 @@ pub fn run_gui_app(config: Config) -> Result<()> {
                 app_state,
                 last_heartbeat,
                 window_visible,
+                keep_nas_on,
             ))
         }),
     )
@@ -364,6 +382,7 @@ pub async fn run_background_tasks(
     app_state: Arc<Mutex<AppState>>,
     last_heartbeat: Arc<Mutex<Instant>>,
     _window_visible: Arc<AtomicBool>,
+    keep_nas_on: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(config.check_interval_secs));
 
@@ -371,16 +390,23 @@ pub async fn run_background_tasks(
         interval.tick().await;
         let is_active = is_user_active(config.idle_threshold_mins);
         let current_state = *app_state.lock().unwrap();
+        let keep_on = keep_nas_on.load(Ordering::SeqCst);
 
-        // Update based on user activity
-        if is_active {
-            // User is active but we need to check NAS status
-            if current_state == AppState::UserIdle || current_state == AppState::Unknown {
+        // Update based on user activity or keep_nas_on setting
+        if is_active || keep_on {
+            // If user is active or we're keeping the NAS on
+            if current_state == AppState::UserIdle && !keep_on {
                 *app_state.lock().unwrap() = AppState::UserActive;
                 info!("State changed to UserActive");
+            } else if current_state == AppState::UserIdle && keep_on {
+                // Stay in UserIdle state but still send heartbeats
+                info!("User is idle but 'Keep NAS on' is active - maintaining connection");
+            } else if current_state == AppState::Unknown {
+                *app_state.lock().unwrap() = if is_active { AppState::UserActive } else { AppState::UserIdle };
+                info!("State changed from Unknown to {}", if is_active { "UserActive" } else { "UserIdle" });
             }
 
-            // Continue sending wake packets when user is active and NAS is not yet available
+            // Continue sending wake packets when NAS is not yet available
             if current_state != AppState::NasAvailable {
                 info!("Sending WOL packet to NAS");
                 wake_nas(&config).await;
@@ -399,22 +425,22 @@ pub async fn run_background_tasks(
                 }
                 _ => {
                     // NAS didn't respond or connection failed
-                    if current_state != AppState::UserActive && current_state != AppState::UserIdle
-                    {
-                        *app_state.lock().unwrap() = AppState::UserActive;
-                        info!("State changed to UserActive (heartbeat failed)");
+                    if current_state == AppState::NasAvailable {
+                        let new_state = if is_active { AppState::UserActive } else { AppState::UserIdle };
+                        *app_state.lock().unwrap() = new_state;
+                        info!("State changed to {} (heartbeat failed)", if is_active { "UserActive" } else { "UserIdle" });
                     }
                     // Still update the time of the attempt
                     *last_heartbeat.lock().unwrap() = Instant::now();
                 }
             }
         } else {
-            // User is idle
+            // User is idle and keep_nas_on is false
             if current_state != AppState::UserIdle {
                 *app_state.lock().unwrap() = AppState::UserIdle;
                 info!("State changed to UserIdle");
             }
-            // No heartbeat in idle state
+            // No heartbeat in idle state when keep_nas_on is false
         }
     }
 }
