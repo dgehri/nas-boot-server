@@ -26,6 +26,7 @@ pub struct NasBootGui {
     tray_item: Option<TrayItem>,
     egui_ctx: Option<egui::Context>,
     exit: Arc<AtomicBool>,
+    keep_nas_on: Arc<AtomicBool>,
 }
 
 impl NasBootGui {
@@ -52,6 +53,7 @@ impl NasBootGui {
             tray_item: None,
             egui_ctx,
             exit: Arc::new(AtomicBool::new(false)),
+            keep_nas_on: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -219,6 +221,17 @@ impl eframe::App for NasBootGui {
 
             ui.horizontal(|ui| {
                 ui.label(format!("Last heartbeat: {}", self.last_heartbeat_ago()));
+            });
+
+            ui.add_space(10.0);
+
+            // Add checkbox for keeping NAS on
+            ui.horizontal(|ui| {
+                let mut keep_nas_on = self.keep_nas_on.load(Ordering::SeqCst);
+                if ui.checkbox(&mut keep_nas_on, "Keep NAS on").changed() {
+                    self.keep_nas_on.store(keep_nas_on, Ordering::SeqCst);
+                    info!("Keep NAS on set to {}", keep_nas_on);
+                }
             });
 
             ui.add_space(10.0);
