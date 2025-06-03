@@ -18,14 +18,11 @@ pub enum AppState {
     Unknown,
 
     /// User is idle
-    Idle,
+    UserIdle,
     
-    /// User is active but NAS is not connected
-    Active,
+    /// User is active but NAS status unknown
+    UserActive,
     
-    /// No NAS connection or NAS is unreachable
-    NoNas, // To remove
-
     /// NAS is available and user is active
     NasAvailable,
 }
@@ -130,7 +127,7 @@ impl App {
         let mut interval = time::interval(Duration::from_secs(self.config.check_interval_secs));
 
         // Set up heartbeat state
-        let mut was_active = true;
+        let mut was_active = false;
 
         info!("App started, waiting for messages");
 
@@ -180,33 +177,34 @@ impl App {
     async fn check_state(&mut self, was_active: bool) -> Result<bool> {
         let is_active = is_user_active(self.config.idle_threshold_mins);
 
-        // Update app state if needed
-        let new_state = if is_active {
-            AppState::Active
-        } else {
-            AppState::Idle
-        };
-
-        if new_state != self.state {
-            self.tx.send(Message::StateChanged(new_state)).await?;
-        }
-
-        // Handle active user state
+        // First update based on user activity
         if is_active {
+            // User is active but we need to check NAS status
+            if self.state == AppState::UserIdle || self.state == AppState::Unknown {
+                self.tx.send(Message::StateChanged(AppState::UserActive)).await?;
+            }
+
             // Handle wake actions if user just became active
             if !was_active {
-                self.handle_user_activation().await;
+                self.wake_nas().await;
             }
 
             // Send heartbeat and update NAS connection state
+            // But only if we're in an active state
             self.send_heartbeat_and_update_state().await;
+        } else {
+            // User is idle
+            if self.state != AppState::UserIdle {
+                self.tx.send(Message::StateChanged(AppState::UserIdle)).await?;
+            }
+            // No heartbeat in idle state
         }
 
         Ok(is_active)
     }
 
     // Handles actions when user becomes active
-    async fn handle_user_activation(&self) {
+    async fn wake_nas(&self) {
         info!("User became active, waking NAS");
         wake_nas(&self.config).await;
     }
@@ -221,17 +219,19 @@ impl App {
         // Update state based on heartbeat result
         match result {
             Ok(true) => {
-                if self.state == AppState::NoNas {
+                // NAS responded successfully
+                if self.state != AppState::NasAvailable {
                     self.tx
-                        .send(Message::StateChanged(AppState::Active))
+                        .send(Message::StateChanged(AppState::NasAvailable))
                         .await
                         .ok();
                 }
             }
             Ok(false) | Err(_) => {
-                if self.state != AppState::NoNas {
+                // NAS didn't respond or connection failed
+                if self.state != AppState::UserActive && self.state != AppState::UserIdle {
                     self.tx
-                        .send(Message::StateChanged(AppState::NoNas))
+                        .send(Message::StateChanged(AppState::UserActive))
                         .await
                         .ok();
                 }
@@ -241,10 +241,10 @@ impl App {
 
     fn update_tray_icon(&mut self) -> Result<()> {
         match self.state {
-            AppState::Active => self.tray.set_icon(IconSource::Resource("nas_green_ico")),
-            AppState::Idle => self.tray.set_icon(IconSource::Resource("nas_yellow_ico")),
-            AppState::NoNas => self.tray.set_icon(IconSource::Resource("nas_red_ico")),
-            AppState::Unknown => self.tray.set_icon(IconSource::Resource("nas_gray_ico")),
+            AppState::Unknown => self.tray.set_icon(IconSource::Resource("nas_grey_ico")),
+            AppState::UserIdle => self.tray.set_icon(IconSource::Resource("nas_red_ico")),
+            AppState::UserActive => self.tray.set_icon(IconSource::Resource("nas_yellow_ico")),
+            AppState::NasAvailable => self.tray.set_icon(IconSource::Resource("nas_green_ico")),
         }
         .context("Failed to update tray icon")
     }
@@ -297,17 +297,20 @@ impl App {
     }
 
     fn show_status(&self) -> Result<()> {
+        let connection_status = match self.state {
+            AppState::NasAvailable => "Connected",
+            AppState::UserActive => "Trying to connect",
+            AppState::UserIdle => "Idle - No connection attempt",
+            AppState::Unknown => "Unknown",
+        };
+
         let message = format!(
             "NAS Boot Client Status\n\n\
              Connection: {}\n\
              Current state: {:?}\n\
              Last activity check: {}s ago\n\
              Auto-start: {}",
-            if self.state == AppState::NoNas {
-                "Disconnected"
-            } else {
-                "Connected"
-            },
+            connection_status,
             self.state,
             self.last_heartbeat.elapsed().as_secs(),
             if is_auto_start_enabled().unwrap_or(false) {

@@ -8,7 +8,7 @@ fn main() -> io::Result<()> {
             ("green", (6, 156, 76)),
             ("red", (212, 44, 15)),
             ("yellow", (224, 189, 11)),
-            ("gray", (128, 128, 128)),
+            ("grey", (128, 128, 128)),
         ];
 
         for (name, color) in colors {
@@ -36,6 +36,7 @@ fn main() -> io::Result<()> {
 
         // Rerun if the base icon changes
         println!("cargo:rerun-if-changed=assets/nas_black.ico");
+        println!("cargo:rerun-if-changed=assets/resources.rc");
     }
     Ok(())
 }
