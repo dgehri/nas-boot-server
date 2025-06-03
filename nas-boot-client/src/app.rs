@@ -138,46 +138,7 @@ impl App {
                             break;
                         }
                         Message::CheckState => {
-                            let is_active = is_user_active(self.config.idle_threshold_mins);
-                            let new_state = if is_active {
-                                Some(AppState::Active)
-                            } else {
-                                Some(AppState::Idle)
-                            };
-
-                            if new_state != self.state {
-                                if let Some(new_state) = new_state {
-                                    self.tx.send(Message::StateChanged(new_state)).await?;
-                                }
-                            }
-
-                            // Handle heartbeat logic
-                            if is_active {
-                                if !last_active {
-                                    info!("User became active, waking NAS");
-                                    wake_nas(&self.config).await;
-                                }
-
-                                // Send heartbeat if we're active
-                                let result = send_heartbeat(&self.config).await;
-                                self.last_heartbeat = Instant::now();
-
-                                // Update state based on heartbeat result
-                                match result {
-                                    Ok(true) => {
-                                        if self.state == Some(AppState::NoNas) {
-                                            self.tx.send(Message::StateChanged(AppState::Active)).await.ok();
-                                        }
-                                    },
-                                    Ok(false) | Err(_) => {
-                                        if self.state != Some(AppState::NoNas) {
-                                            self.tx.send(Message::StateChanged(AppState::NoNas)).await.ok();
-                                        }
-                                    }
-                                }
-                            }
-
-                            last_active = is_active;
+                            last_active = self.check_state(last_active).await?;
                         }
                         Message::StateChanged(new_state) => {
                             info!("State changed from {:?} to {:?}", self.state, new_state);
@@ -203,6 +164,63 @@ impl App {
 
         info!("Exiting application");
         Ok(())
+    }
+
+    // Checks the current state and handles activity changes
+    async fn check_state(&mut self, last_active: bool) -> Result<bool> {
+        let is_active = is_user_active(self.config.idle_threshold_mins);
+        
+        // Update app state if needed
+        let new_state = if is_active {
+            Some(AppState::Active)
+        } else {
+            Some(AppState::Idle)
+        };
+
+        if new_state != self.state {
+            if let Some(new_state) = new_state {
+                self.tx.send(Message::StateChanged(new_state)).await?;
+            }
+        }
+
+        // Handle active user state
+        if is_active {
+            // Handle wake actions if user just became active
+            if !last_active {
+                self.handle_user_activation().await;
+            }
+            
+            // Send heartbeat and update NAS connection state
+            self.send_heartbeat_and_update_state().await;
+        }
+
+        Ok(is_active)
+    }
+
+    // Handles actions when user becomes active
+    async fn handle_user_activation(&self) {
+        info!("User became active, waking NAS");
+        wake_nas(&self.config).await;
+    }
+
+    // Sends heartbeat and updates NAS connection state
+    async fn send_heartbeat_and_update_state(&mut self) {
+        let result = send_heartbeat(&self.config).await;
+        self.last_heartbeat = Instant::now();
+        
+        // Update state based on heartbeat result
+        match result {
+            Ok(true) => {
+                if self.state == Some(AppState::NoNas) {
+                    self.tx.send(Message::StateChanged(AppState::Active)).await.ok();
+                }
+            },
+            Ok(false) | Err(_) => {
+                if self.state != Some(AppState::NoNas) {
+                    self.tx.send(Message::StateChanged(AppState::NoNas)).await.ok();
+                }
+            }
+        }
     }
 
     fn update_tray_icon(&mut self) -> Result<()> {
