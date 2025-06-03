@@ -108,6 +108,13 @@
                             <Permission User="Everyone" GenericAll="yes" />
                         </CreateFolder>
 
+                        <!-- Add registry entry to store config directory location -->
+                        <RegistryValue Root="HKLM"
+                            Key="Software\[Manufacturer]\[ProductName]"
+                            Name="ConfigDir"
+                            Type="string"
+                            Value="[ConfigDir]" />
+
                         <!-- Install the configuration file -->
                         <File Id="ConfigFile"
                             Name="nas-boot-client-config.yaml"
@@ -148,9 +155,51 @@
 
         <Property Id='ARPHELPLINK' Value='https://github.com/dgehri/nas-boot-server' />
 
+        <!-- Add properties and custom actions for launching and closing the application -->
+        <Property Id="WixShellExecTarget" Value="[#exe0]" />
+        <CustomAction Id="LaunchApplication"
+            BinaryKey="WixCA"
+            DllEntry="WixShellExec"
+            Impersonate="yes" />
+
+        <!-- Custom action to close the application during uninstall -->
+        <CustomAction Id="CloseApplication"
+            Directory="APPLICATIONFOLDER"
+            ExeCommand="cmd.exe /c taskkill /F /IM nas-boot-client.exe"
+            Execute="immediate"
+            Return="ignore" />
+
+        <!-- Set property for RemoveFolderEx -->
+        <Property Id="CONFIGDIR">
+            <RegistrySearch Id="ConfigDirSearch"
+                Root="HKLM"
+                Key="Software\[Manufacturer]\[ProductName]"
+                Name="ConfigDir"
+                Type="raw" />
+        </Property>
+        <CustomAction Id="SetConfigDir"
+            Property="CONFIGDIR"
+            Value="[ConfigDir]"
+            Execute="immediate" />
+
         <UI>
             <UIRef Id='WixUI_FeatureTree' />
         </UI>
+
+        <InstallExecuteSequence>
+            <!-- Set the config directory property -->
+            <Custom Action="SetConfigDir" After="AppSearch">NOT Installed</Custom>
+
+            <!-- Close application before uninstall -->
+            <Custom Action="CloseApplication" Before="InstallValidate">
+                Installed AND REMOVE="ALL"
+            </Custom>
+
+            <!-- Launch application after install -->
+            <Custom Action="LaunchApplication" After="InstallFinalize">
+                NOT Installed
+            </Custom>
+        </InstallExecuteSequence>
 
         <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf' />
     </Product>
