@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::time;
 use tray_item::{IconSource, TrayItem};
+use raw_window_handle::HasWindowHandle;
 
 pub struct NasBootGui {
     config: Config,
@@ -21,15 +22,20 @@ pub struct NasBootGui {
     runtime: Runtime,
     window_visible: bool,
     tray_item: Option<TrayItem>,
+    window: Option<Arc<winit::window::Window>>,
 }
 
 impl NasBootGui {
     pub fn new(
+        cc: &eframe::CreationContext<'_>,
         config: Config,
         shared_state: Arc<Mutex<AppState>>,
         last_heartbeat: Arc<Mutex<Instant>>,
     ) -> Self {
         let auto_start_enabled = is_auto_start_enabled().unwrap_or(false);
+        
+        // Store the window handle for direct manipulation
+        let window = cc.integration_info.window.clone();
 
         Self {
             config,
@@ -40,6 +46,7 @@ impl NasBootGui {
             runtime: Runtime::new().expect("Failed to create Tokio runtime"),
             window_visible: true,
             tray_item: None,
+            window,
         }
     }
 
@@ -72,19 +79,27 @@ impl NasBootGui {
         if self.tray_item.is_none() {
             let mut tray = TrayItem::new("NAS Boot Client", IconSource::Resource("nas_black_ico"))?;
 
-            // Add "Show Window" menu item
-            let ctx_clone = ctx.clone();
-            tray.add_menu_item("Show Window", move || {
-                log::info!("Showing main window from tray");
-                ctx_clone.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            })?;
+            // Add "Show Window" menu item using direct window access
+            if let Some(window) = self.window.clone() {
+                tray.add_menu_item("Show Window", move || {
+                    log::info!("Showing main window from tray");
+                    window.set_visible(true);
+                    window.focus_window();
+                    window.request_redraw();
+                })?;
+            }
 
-            // Add "Exit" menu item
-            let ctx_clone = ctx.clone();
-            tray.add_menu_item("Exit", move || {
-                log::info!("Exiting application from tray");
-                ctx_clone.send_viewport_cmd(egui::ViewportCommand::Close);
-            })?;
+            // Add "Exit" menu item using direct window access
+            if let Some(window) = self.window.clone() {
+                tray.add_menu_item("Exit", move || {
+                    log::info!("Exiting application from tray");
+                    window.set_visible(true); // Make visible first to ensure the close event is processed
+                    window.request_redraw();
+                    window.request_user_attention(Some(winit::window::UserAttentionType::Critical));
+                    window.set_minimized(false);
+                    window.close();
+                })?;
+            }
 
             // Update tray icon based on current state
             self.update_tray_icon()?;
@@ -200,10 +215,16 @@ impl eframe::App for NasBootGui {
 
             ui.add_space(10.0);
 
-            // Hide to tray button
+            // Hide to tray button - still using viewport command for this
             if ui.button("Hide to Tray").clicked() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.window_visible = false;
+                if let Some(window) = &self.window {
+                    log::info!("Hiding window to tray");
+                    window.set_visible(false);
+                    self.window_visible = false;
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    self.window_visible = false;
+                }
             }
         });
 
@@ -252,7 +273,7 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     eframe::run_native(
         "NAS Boot Client",
         options,
-        Box::new(|_cc| Box::new(NasBootGui::new(config, app_state, last_heartbeat))),
+        Box::new(move |cc| Box::new(NasBootGui::new(cc, config, app_state, last_heartbeat))),
     )
     .map_err(|e| anyhow::anyhow!("Failed to start GUI: {}", e))?;
 
