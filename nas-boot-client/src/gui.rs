@@ -297,7 +297,7 @@ pub async fn run_background_tasks(
     config: Config,
     app_state: Arc<Mutex<AppState>>,
     last_heartbeat: Arc<Mutex<Instant>>,
-    window_visible: Arc<AtomicBool>,
+    _window_visible: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(config.check_interval_secs));
 
