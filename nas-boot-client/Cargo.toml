@@ -29,3 +29,4 @@ yaml-rust2 = { workspace = true }
 
 [build-dependencies]
 winresource = { workspace = true }
+image = { workspace = true, features = ["ico"] }
