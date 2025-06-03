@@ -1,16 +1,19 @@
-mod app;
-mod config;
-mod nas;
-mod system;
-mod user_activity;
+#![windows_subsystem = "windows"]
 
 use anyhow::Result;
-use app::App;
 use clap::{Parser, Subcommand};
 use config::{generate_config, load_config};
 use log::info;
 use std::io::Write;
-use system::{hide_window_console, set_auto_start};
+use system::set_auto_start;
+use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+
+mod app;
+mod config;
+mod gui;
+mod nas;
+mod system;
+mod user_activity;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -67,40 +70,37 @@ fn main() -> Result<()> {
         Some(Commands::DisableAutoStart) => set_auto_start(false).map(|()| {
             info!("Auto-start disabled");
         }),
-        Some(Commands::Debug) => run_app_with_console(),
-        None => run_app(),
+        Some(Commands::Debug) => run_app_gui(true),
+        None => run_app_gui(false),
     }
 }
 
-fn run_app() -> Result<()> {
-    // Hide the console window early
-    hide_window_console();
+fn run_app_gui(debug_mode: bool) -> Result<()> {
+    // Allocate a Win32 console if running in debug mode
+    if debug_mode {
+        unsafe {
+            AttachConsole(ATTACH_PARENT_PROCESS)
+                .map_err(|e| anyhow::anyhow!("Failed to attach console: {:?}", e))?;
+        }
+    }
 
     // Load configuration
-    let config = load_config()?;
+    let config = match load_config() {
+        Ok(config) => config,
+        Err(err) => {
+            if debug_mode {
+                eprintln!("Error loading configuration: {}", err);
+                return Err(err);
+            } else {
+                // Try to generate a default config if running in normal mode
+                generate_config()?;
+                load_config()?
+            }
+        }
+    };
 
-    // Run the Tokio runtime
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        // Create the app
-        let (app, rx) = App::new(config)?;
+    // Run the GUI app directly - it will spawn its own background tasks
+    gui::run_gui_app(config)?;
 
-        // Run the app
-        app.run(rx).await
-    })
-}
-
-fn run_app_with_console() -> Result<()> {
-    // Load configuration
-    let config = load_config()?;
-
-    // Run the Tokio runtime
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        // Create the app
-        let (app, rx) = App::new(config)?;
-
-        // Run the app
-        app.run(rx).await
-    })
+    Ok(())
 }

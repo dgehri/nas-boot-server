@@ -44,34 +44,3 @@ pub fn is_auto_start_enabled() -> Result<bool> {
         Err(_) => Ok(false),
     }
 }
-
-pub fn show_window(hwnd: HWND) {
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOW);
-    }
-}
-
-pub fn hide_window(hwnd: HWND) {
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_HIDE);
-    }
-}
-
-pub fn hide_window_console() {
-    let console_window = unsafe { GetConsoleWindow() };
-    if !console_window.is_invalid() {
-        unsafe {
-            let _ = ShowWindow(console_window, SW_HIDE);
-        }
-    }
-}
-
-#[allow(dead_code)]
-pub fn show_window_console() {
-    let console_window = unsafe { GetConsoleWindow() };
-    if !console_window.is_invalid() {
-        unsafe {
-            let _ = ShowWindow(console_window, SW_SHOW);
-        }
-    }
-}

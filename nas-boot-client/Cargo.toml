@@ -27,6 +27,9 @@ wake-on-lan = { workspace = true }
 windows = { workspace = true }
 winreg = { workspace = true }
 yaml-rust2 = { workspace = true }
+# Add egui dependencies
+egui = "0.26.0"
+eframe = "0.26.0"
 
 [build-dependencies]
 winresource = { workspace = true }
