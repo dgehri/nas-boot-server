@@ -1,7 +1,7 @@
 use crate::app::AppState;
 use crate::config::Config;
 use crate::nas::{send_heartbeat, wake_nas};
-use crate::system::{is_auto_start_enabled, set_auto_start, find_app_window, show_window, close_window};
+use crate::system::{is_auto_start_enabled, set_auto_start, find_app_window, show_window, close_window, hide_window};
 use crate::user_activity::is_user_active;
 use anyhow::Result;
 use eframe::{egui, Frame};
@@ -82,12 +82,20 @@ impl NasBootGui {
 
             // Add "Show Window" menu item using Win32 API directly
             let window_visible = self.window_visible.clone();
+            let egui_ctx = self.egui_ctx.clone();
             tray.add_menu_item("Show Window", move || {
                 log::info!("Showing main window from tray using Win32 API");
                 if let Ok(hwnd) = find_app_window() {
                     if show_window(hwnd).is_ok() {
                         window_visible.store(true, Ordering::SeqCst);
                         log::info!("Window successfully shown");
+                        
+                        // Also update egui state if possible
+                        if let Some(ctx) = &egui_ctx {
+                            log::info!("Sending viewport visible command");
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.request_repaint();
+                        }
                     } else {
                         log::error!("Failed to show window");
                     }
@@ -131,6 +139,29 @@ impl NasBootGui {
             }
         }
         Ok(())
+    }
+    
+    // Helper method to hide window consistently using both approaches
+    fn hide_to_tray(&self, ctx: &egui::Context) {
+        log::info!("Hiding window to tray");
+        
+        // First try the Win32 API approach
+        if let Ok(hwnd) = find_app_window() {
+            if let Err(e) = hide_window(hwnd) {
+                log::error!("Failed to hide window with Win32 API: {:?}", e);
+            } else {
+                log::info!("Window hidden with Win32 API");
+            }
+        } else {
+            log::error!("Could not find application window for hiding");
+        }
+        
+        // Then use the egui approach as well for good measure
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.window_visible.store(false, Ordering::SeqCst);
+        
+        // Force a repaint to apply changes
+        ctx.request_repaint();
     }
 }
 
@@ -232,10 +263,7 @@ impl eframe::App for NasBootGui {
 
             // Hide to tray button using a combination of viewport commands and our state tracking
             if ui.button("Hide to Tray").clicked() {
-                log::info!("Hiding window to tray");
-                // Hide using viewport command first (works for the current window)
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.window_visible.store(false, Ordering::SeqCst);
+                self.hide_to_tray(ctx);
             }
         });
 

@@ -3,7 +3,7 @@ use log::info;
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, PostMessageW, ShowWindow, SW_NORMAL, SW_RESTORE, WM_CLOSE,
+    FindWindowW, PostMessageW, ShowWindow, SW_HIDE, SW_NORMAL, SW_RESTORE, WM_CLOSE,
 };
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
@@ -70,6 +70,14 @@ pub fn show_window(hwnd: HWND) -> Result<(), windows::core::Error> {
         // Set focus to the window
         let _ = ShowWindow(hwnd, SW_NORMAL);
 
+        Ok(())
+    }
+}
+
+// Hide the window
+pub fn hide_window(hwnd: HWND) -> Result<(), windows::core::Error> {
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
         Ok(())
     }
 }
