@@ -14,6 +14,7 @@ path-guid = "81FB475B-18B0-446E-BD41-1D22E4710554"
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+clap-verbosity = { workspace = true }
 env_logger = { workspace = true }
 hostname = { workspace = true }
 log = { workspace = true }

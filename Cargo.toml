@@ -7,6 +7,7 @@ anyhow = "1.0"
 axum = { version = "0.8.4", default-features = false, features = ["tokio", "http1", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5.39", features = ["derive"] }
+clap-verbosity = "2.1.0"
 env_logger = "0.11.8"
 hostname = "0.4"
 image = { version = "0.25.6", features = ["ico"] }

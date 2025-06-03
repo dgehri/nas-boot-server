@@ -351,6 +351,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap-verbosity"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7bf75a8e0407a558bd7e8e7919baa352e21fb0c1c7702a63c853f2277c4c63"
+dependencies = [
+ "clap",
+ "log",
+ "serde",
+]
+
+[[package]]
 name = "clap_builder"
 version = "4.5.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1354,6 +1365,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "clap-verbosity",
  "env_logger",
  "hostname",
  "image",

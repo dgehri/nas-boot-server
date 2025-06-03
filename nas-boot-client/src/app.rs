@@ -126,9 +126,6 @@ impl App {
         // Set up state check interval
         let mut interval = time::interval(Duration::from_secs(self.config.check_interval_secs));
 
-        // Set up heartbeat state
-        let mut was_active = false;
-
         info!("App started, waiting for messages");
 
         loop {
@@ -145,7 +142,7 @@ impl App {
                             break;
                         }
                         Message::CheckState => {
-                            was_active = self.check_state(was_active).await?;
+                            self.check_state().await?;
                         }
                         Message::StateChanged(new_state) => {
                             info!("State changed from {:?} to {:?}", self.state, new_state);
@@ -174,7 +171,7 @@ impl App {
     }
 
     // Checks the current state and handles activity changes
-    async fn check_state(&mut self, was_active: bool) -> Result<bool> {
+    async fn check_state(&mut self) -> Result<()> {
         let is_active = is_user_active(self.config.idle_threshold_mins);
 
         // First update based on user activity
@@ -184,8 +181,8 @@ impl App {
                 self.tx.send(Message::StateChanged(AppState::UserActive)).await?;
             }
 
-            // Handle wake actions if user just became active
-            if !was_active {
+            // Continue sending wake packets when user is active and NAS is not yet available
+            if self.state != AppState::NasAvailable {
                 self.wake_nas().await;
             }
 
@@ -200,12 +197,12 @@ impl App {
             // No heartbeat in idle state
         }
 
-        Ok(is_active)
+        Ok(())
     }
 
     // Handles actions when user becomes active
     async fn wake_nas(&self) {
-        info!("User became active, waking NAS");
+        info!("Sending WOL packet to NAS");
         wake_nas(&self.config).await;
     }
 

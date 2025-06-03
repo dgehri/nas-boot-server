@@ -15,6 +15,9 @@ use system::{hide_window_console, set_auto_start};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    #[command(flatten)]
+    verbose: clap_verbosity::Verbosity,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -35,25 +38,26 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+
     // Initialize logging
     env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
         .format_timestamp_secs()
         .format_target(false)
         .format_module_path(false)
         .format(|buf, record| {
-            writeln!(buf,
-            "{} [{}] {}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-            record.level(),
-            record.args()
+            writeln!(
+                buf,
+                "{} [{}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.args()
             )
         })
+        .filter_level(cli.verbose.log_level_filter())
         .init();
 
     info!("NAS Boot Client starting...");
-
-    let cli = Cli::parse();
 
     match cli.command {
         Some(Commands::GenerateConfig) => generate_config(),
