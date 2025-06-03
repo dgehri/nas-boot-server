@@ -1,6 +1,6 @@
 # NAS Boot Manager
 
-A Rust-based solution for automatically managing NAS power state based on client activity. Replaces the original Python script running on AsusWRT Merlin routers with a more reliable client-server architecture.
+A Rust-based solution for automatically managing NAS power state based on client activity.
 
 ## Overview
 
@@ -8,15 +8,6 @@ This project consists of two components:
 
 1. **NAS Boot Client** - A Windows service that runs on PCs and monitors actual user activity (not just network presence)
 2. **NAS Boot Server** - A service that runs on the NAS and manages automatic shutdown based on client heartbeats
-
-## Why This Solution?
-
-The original Python script running on AsusWRT Merlin routers had issues with Windows 11 sleep modes causing false positives for PC activity. This solution:
-
-- Detects actual user activity (keyboard/mouse input) rather than just network presence
-- Works reliably with Windows 11 sleep/wake patterns
-- Supports Wake-on-LAN over VPN connections
-- Provides configurable shutdown delays and conditions
 
 ## Components
 
@@ -68,7 +59,7 @@ Runs on the NAS and:
    nas-boot-client.exe generate-config
    ```
 
-4. Edit configuration at `%USERPROFILE%\.config\nas-boot\nas-boot-client-config.yaml`:
+4. Edit configuration at `%PROGRAMDATA%\NASBootClient\nas-boot-client-config.yaml`:
 
    ```yaml
    nas_mac: "00:08:9B:DB:EF:9A"
