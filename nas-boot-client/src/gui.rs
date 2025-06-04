@@ -2,70 +2,79 @@ use crate::app::AppState;
 use crate::config::Config;
 use crate::nas::send_heartbeat;
 use crate::system::{
-    close_window, find_app_window, hide_window, is_auto_start_enabled, set_auto_start, show_window,
+    close_window, find_app_window, hide_window, is_auto_start_enabled, is_window_iconic,
+    load_icon_from_resource, set_auto_start, show_window,
 };
 use crate::user_activity::is_user_active;
 use crate::wol::wake_nas;
 use anyhow::Result;
 use eframe::{egui, Frame};
-use egui::IconData;
 use log::info;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::runtime::Runtime;
 use tokio::time;
 use tray_item::{IconSource, TrayItem};
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::HINSTANCE;
-use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject,
-};
-use windows::Win32::Graphics::Gdi::{BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS};
-use windows::Win32::UI::WindowsAndMessaging::{DrawIconEx, GetIconInfo, DI_NORMAL};
-use windows::Win32::UI::WindowsAndMessaging::{LoadImageW, IMAGE_ICON, LR_DEFAULTSIZE};
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum WakeMode {
+    /// NAS won't be woken up or kept on
+    #[default]
+    Off,
+
+    /// NAS will be woken up on user activity and kept on unless user is idle
+    Auto,
+
+    /// NAS will be kept on regardless of user activity
+    AlwaysOn,
+}
+
+impl From<u8> for WakeMode {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => WakeMode::Off,
+            1 => WakeMode::Auto,
+            2 => WakeMode::AlwaysOn,
+            _ => WakeMode::Off,
+        }
+    }
+}
 
 pub struct NasBootGui {
-    config: Config,
     app_state: Arc<Mutex<AppState>>,
     last_heartbeat_time: Arc<Mutex<Instant>>,
     auto_start_enabled: bool,
     last_check_time: Instant,
-    runtime: Runtime,
     window_visible: Arc<AtomicBool>,
     tray_item: Option<TrayItem>,
     egui_ctx: Option<egui::Context>,
     exit: Arc<AtomicBool>,
-    keep_nas_on: Arc<AtomicBool>,
+    wake_mode: Arc<AtomicU8>,
 }
 
 impl NasBootGui {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        config: Config,
         shared_state: Arc<Mutex<AppState>>,
         last_heartbeat: Arc<Mutex<Instant>>,
         window_visible: Arc<AtomicBool>,
-        keep_nas_on: Arc<AtomicBool>,
+        wake_mode: Arc<AtomicU8>,
     ) -> Self {
-        let auto_start_enabled = is_auto_start_enabled().unwrap_or(false);
+        let auto_start_enabled = is_auto_start_enabled();
 
         // Store the egui context for viewport commands
         let egui_ctx = Some(cc.egui_ctx.clone());
 
         Self {
-            config,
             app_state: shared_state,
             last_heartbeat_time: last_heartbeat,
             auto_start_enabled,
             last_check_time: Instant::now(),
-            runtime: Runtime::new().expect("Failed to create Tokio runtime"),
             window_visible,
             tray_item: None,
             egui_ctx,
             exit: Arc::new(AtomicBool::new(false)),
-            keep_nas_on,
+            wake_mode,
         }
     }
 
@@ -73,16 +82,16 @@ impl NasBootGui {
         let state = *self.app_state.lock().unwrap();
         match state {
             AppState::Unknown => "Status: Unknown".to_string(),
-            AppState::UserIdle => {
-                if self.keep_nas_on.load(Ordering::SeqCst) {
-                    "Status: User is idle (keeping NAS on)".to_string()
-                } else {
-                    "Status: User is idle".to_string()
-                }
-            }
-            AppState::UserActive => {
-                "Status: User active, attempting to connect to NAS...".to_string()
-            }
+            AppState::UserIdle => match self.wake_mode.load(Ordering::SeqCst).into() {
+                WakeMode::AlwaysOn => "Status: Keeping NAS always on".to_string(),
+                WakeMode::Auto => "Status: User is idle, NAS will wake on activity".to_string(),
+                WakeMode::Off => "Status: NAS will not wake".to_string(),
+            },
+            AppState::UserActive => match self.wake_mode.load(Ordering::SeqCst).into() {
+                WakeMode::AlwaysOn => "Status: Keeping NAS always on".to_string(),
+                WakeMode::Auto => "Status: User is active, waking NAS".to_string(),
+                WakeMode::Off => "Status: NAS will not wake".to_string(),
+            },
             AppState::NasAvailable => "Status: Connected to NAS".to_string(),
         }
     }
@@ -92,7 +101,7 @@ impl NasBootGui {
         let seconds = duration.as_secs();
 
         if seconds < 60 {
-            format!("{} seconds ago", seconds)
+            format!("{seconds} seconds ago")
         } else if seconds < 3600 {
             format!("{} minutes ago", seconds / 60)
         } else {
@@ -108,23 +117,17 @@ impl NasBootGui {
             let window_visible = self.window_visible.clone();
             let egui_ctx = self.egui_ctx.clone();
             tray.add_menu_item("Show Window", move || {
-                log::info!("Showing main window from tray using Win32 API");
                 if let Ok(hwnd) = find_app_window() {
-                    if show_window(hwnd).is_ok() {
+                    show_window(hwnd);
+                    if is_window_iconic(hwnd) {
                         window_visible.store(true, Ordering::SeqCst);
-                        log::info!("Window successfully shown");
 
                         // Also update egui state if possible
                         if let Some(ctx) = &egui_ctx {
-                            log::info!("Sending viewport visible command");
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                             ctx.request_repaint();
                         }
-                    } else {
-                        log::error!("Failed to show window");
                     }
-                } else {
-                    log::error!("Could not find application window");
                 }
             })?;
 
@@ -135,15 +138,10 @@ impl NasBootGui {
                 exit_clone.store(true, Ordering::SeqCst);
 
                 if let Ok(hwnd) = find_app_window() {
-                    let _ = show_window(hwnd); // Show window first to ensure it can process close message
-                    if let Err(e) = close_window(hwnd) {
-                        log::error!("Failed to close window: {:?}", e);
-                        std::process::exit(0); // Force exit if message sending fails
-                    }
-                } else {
-                    log::error!("Could not find application window, forcing exit");
-                    std::process::exit(0);
+                    let () = show_window(hwnd);
+                    let _ = close_window(hwnd);
                 }
+                std::process::exit(0);
             })?;
 
             // Update tray icon based on current state
@@ -160,15 +158,13 @@ impl NasBootGui {
             let current_state = *self.app_state.lock().unwrap();
             match current_state {
                 AppState::Unknown => tray.set_icon(IconSource::Resource("nas_grey_ico"))?,
-                AppState::UserIdle => {
-                    // Use yellow icon if keep_nas_on is active
-                    if self.keep_nas_on.load(Ordering::SeqCst) {
+                AppState::UserIdle => tray.set_icon(IconSource::Resource("nas_grey_ico"))?,
+                AppState::UserActive => match self.wake_mode.load(Ordering::SeqCst).into() {
+                    WakeMode::Off => tray.set_icon(IconSource::Resource("nas_grey_ico"))?,
+                    WakeMode::Auto | WakeMode::AlwaysOn => {
                         tray.set_icon(IconSource::Resource("nas_yellow_ico"))?
-                    } else {
-                        tray.set_icon(IconSource::Resource("nas_red_ico"))?
                     }
-                }
-                AppState::UserActive => tray.set_icon(IconSource::Resource("nas_yellow_ico"))?,
+                },
                 AppState::NasAvailable => tray.set_icon(IconSource::Resource("nas_green_ico"))?,
             }
         }
@@ -177,13 +173,9 @@ impl NasBootGui {
 
     // Helper method to hide window consistently using both approaches
     fn hide_to_tray(&self, ctx: &egui::Context) {
-        log::info!("Hiding window to tray");
-
         // First try the Win32 API approach
         if let Ok(hwnd) = find_app_window() {
-            if let Err(e) = hide_window(hwnd) {
-                log::error!("Failed to hide window with Win32 API: {:?}", e);
-            }
+            hide_window(hwnd);
         } else {
             log::error!("Could not find application window for hiding");
         }
@@ -207,11 +199,11 @@ impl eframe::App for NasBootGui {
         // Set up tray icon if not already done
         if self.tray_item.is_none() {
             if let Err(e) = self.setup_tray(ctx) {
-                log::error!("Failed to set up tray icon: {}", e);
+                log::error!("Failed to set up tray icon: {e}");
             }
 
             // and hide this window to the tray
-            // self.hide_to_tray(ctx);
+            self.hide_to_tray(ctx);
         }
 
         // Check if we need to update the state (every second)
@@ -219,11 +211,11 @@ impl eframe::App for NasBootGui {
             self.last_check_time = Instant::now();
 
             // Refresh auto-start status
-            self.auto_start_enabled = is_auto_start_enabled().unwrap_or(self.auto_start_enabled);
+            self.auto_start_enabled = is_auto_start_enabled();
 
             // Update tray icon if state changed
             if let Err(e) = self.update_tray_icon() {
-                log::error!("Failed to update tray icon: {}", e);
+                log::error!("Failed to update tray icon: {e}");
             }
 
             // Request repaint to show latest state
@@ -239,19 +231,16 @@ impl eframe::App for NasBootGui {
                 ui.label(status_text);
             });
 
-            ui.horizontal(|ui| {
-                ui.label(format!("Last heartbeat: {}", self.last_heartbeat_ago()));
-            });
-
             ui.add_space(10.0);
 
-            // Add checkbox for keeping NAS on
+            // Use radio buttons for wake mode selection
             ui.horizontal(|ui| {
-                let mut keep_nas_on = self.keep_nas_on.load(Ordering::SeqCst);
-                if ui.checkbox(&mut keep_nas_on, "Keep NAS on").changed() {
-                    self.keep_nas_on.store(keep_nas_on, Ordering::SeqCst);
-                    info!("Keep NAS on set to {}", keep_nas_on);
-                }
+                ui.label("Wake Mode:");
+                let mut wake_mode = self.wake_mode.load(Ordering::SeqCst);
+                ui.radio_value(&mut wake_mode, WakeMode::Off as u8, "Off");
+                ui.radio_value(&mut wake_mode, WakeMode::Auto as u8, "Auto");
+                ui.radio_value(&mut wake_mode, WakeMode::AlwaysOn as u8, "Always On");
+                self.wake_mode.store(wake_mode, Ordering::SeqCst);
             });
 
             ui.add_space(10.0);
@@ -261,7 +250,7 @@ impl eframe::App for NasBootGui {
                 let mut auto_start = self.auto_start_enabled;
                 if ui.checkbox(&mut auto_start, "Start with Windows").changed() {
                     if let Err(e) = set_auto_start(auto_start) {
-                        info!("Failed to set auto-start: {}", e);
+                        info!("Failed to set auto-start: {e}");
                     } else {
                         self.auto_start_enabled = auto_start;
                     }
@@ -270,47 +259,9 @@ impl eframe::App for NasBootGui {
 
             ui.add_space(10.0);
 
-            // Wake NAS button
-            if ui.button("Wake NAS").clicked() {
-                let config = self.config.clone();
-                // Use the runtime that we've created
-                self.runtime.spawn(async move {
-                    info!("Manually sending WOL packet to NAS");
-                    let _ = wake_nas(&config).await;
-                });
-            }
-
-            // Force status update button
-            if ui.button("Check Connection").clicked() {
-                let config = self.config.clone();
-                let app_state = self.app_state.clone();
-                let last_heartbeat_time = self.last_heartbeat_time.clone();
-
-                // Use the runtime that we've created
-                self.runtime.spawn(async move {
-                    info!("Manually checking NAS status");
-                    match send_heartbeat(&config).await {
-                        Ok(true) => {
-                            *app_state.lock().unwrap() = AppState::NasAvailable;
-                            info!("State changed to NasAvailable (manual check)");
-                        }
-                        _ => {
-                            if *app_state.lock().unwrap() == AppState::NasAvailable {
-                                *app_state.lock().unwrap() = AppState::UserActive;
-                                info!("State changed to UserActive (manual check)");
-                            }
-                        }
-                    }
-                    *last_heartbeat_time.lock().unwrap() = Instant::now();
-                });
-            }
-
-            ui.add_space(10.0);
-
-            // Hide to tray button using a combination of viewport commands and our state tracking
-            if ui.button("Hide to Tray").clicked() {
-                self.hide_to_tray(ctx);
-            }
+            ui.horizontal(|ui| {
+                ui.label(format!("Last heartbeat: {}", self.last_heartbeat_ago()));
+            });
         });
 
         // Request repaint once per second
@@ -332,9 +283,8 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     let icon = load_icon_from_resource();
 
     let viewport = egui::ViewportBuilder::default()
-        .with_inner_size([350.0, 200.0])
         .with_resizable(false)
-        .with_minimize_button(false)
+        .with_minimize_button(true)
         .with_always_on_top()
         .with_icon(icon.unwrap_or_default());
 
@@ -354,19 +304,33 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            if let Err(e) = run_background_tasks(
-                config_clone,
-                app_state_clone,
-                last_heartbeat_clone,
-                window_visible_clone,
-                keep_nas_on_clone,
-            )
-            .await
-            {
-                log::error!("Background task error: {}", e);
+            // Start the main background task
+            let background_task = tokio::spawn(async move {
+                if let Err(e) = run_background_task(
+                    config_clone,
+                    app_state_clone,
+                    last_heartbeat_clone,
+                    keep_nas_on_clone,
+                )
+                .await
+                {
+                    log::error!("Background task error: {e}");
+                }
+            });
+
+            // Start the window visibility monitoring task
+            let window_monitor_task =
+                tokio::spawn(async move { run_minimizer_task(window_visible_clone).await });
+
+            // Wait for either task to complete (they should run indefinitely)
+            tokio::select! {
+                _ = background_task => {},
+                _ = window_monitor_task => {},
             }
         });
     });
+
+    let wake_mode = Arc::new(AtomicU8::new(WakeMode::Auto as u8));
 
     eframe::run_native(
         "NAS Boot Client",
@@ -374,11 +338,10 @@ pub fn run_gui_app(config: Config) -> Result<()> {
         Box::new(move |cc| {
             Ok(Box::new(NasBootGui::new(
                 cc,
-                config,
                 app_state,
                 last_heartbeat,
                 window_visible,
-                keep_nas_on,
+                wake_mode,
             )))
         }),
     )
@@ -387,11 +350,28 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_background_tasks(
+async fn run_minimizer_task(window_visible: Arc<AtomicBool>) -> ! {
+    let mut interval = time::interval(Duration::from_millis(100));
+
+    loop {
+        interval.tick().await;
+
+        // Find the window each time instead of caching it
+        if let Ok(hwnd) = find_app_window() {
+            // Check if window should be hidden but isn't in tray
+            if window_visible.load(Ordering::SeqCst) && is_window_iconic(hwnd) {
+                log::info!("Window is visible but should be hidden - hiding to tray");
+                hide_window(hwnd);
+                window_visible.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+pub async fn run_background_task(
     config: Config,
     app_state: Arc<Mutex<AppState>>,
     last_heartbeat: Arc<Mutex<Instant>>,
-    _window_visible: Arc<AtomicBool>,
     keep_nas_on: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(config.check_interval_secs));
@@ -402,7 +382,7 @@ pub async fn run_background_tasks(
         let current_state = *app_state.lock().unwrap();
         let keep_on = keep_nas_on.load(Ordering::SeqCst);
 
-        log::debug!("User active: {}, Keep NAS on: {}", is_active, keep_on);
+        log::debug!("User active: {is_active}, Keep NAS on: {keep_on}");
 
         // Update based on user activity or keep_nas_on setting
         if is_active || keep_on {
@@ -429,38 +409,35 @@ pub async fn run_background_tasks(
             if current_state != AppState::NasAvailable {
                 info!("Sending WOL packet to NAS");
                 if let Err(e) = wake_nas(&config).await {
-                    log::error!("Failed to send WOL packet: {}", e);
+                    log::error!("Failed to send WOL packet: {e}");
                 }
             }
 
             // Send heartbeat and update NAS connection state
-            match send_heartbeat(&config).await {
-                Ok(true) => {
-                    // NAS responded successfully
-                    if current_state != AppState::NasAvailable {
-                        *app_state.lock().unwrap() = AppState::NasAvailable;
-                        info!("State changed to NasAvailable");
-                    }
-                    // Update last heartbeat time
-                    *last_heartbeat.lock().unwrap() = Instant::now();
+            if let Ok(true) = send_heartbeat(&config).await {
+                // NAS responded successfully
+                if current_state != AppState::NasAvailable {
+                    *app_state.lock().unwrap() = AppState::NasAvailable;
+                    info!("State changed to NasAvailable");
                 }
-                _ => {
-                    // NAS didn't respond or connection failed
-                    if current_state == AppState::NasAvailable {
-                        let new_state = if is_active {
-                            AppState::UserActive
-                        } else {
-                            AppState::UserIdle
-                        };
-                        *app_state.lock().unwrap() = new_state;
-                        info!(
-                            "State changed to {} (heartbeat failed)",
-                            if is_active { "UserActive" } else { "UserIdle" }
-                        );
-                    }
-                    // Still update the time of the attempt
-                    *last_heartbeat.lock().unwrap() = Instant::now();
+                // Update last heartbeat time
+                *last_heartbeat.lock().unwrap() = Instant::now();
+            } else {
+                // NAS didn't respond or connection failed
+                if current_state == AppState::NasAvailable {
+                    let new_state = if is_active {
+                        AppState::UserActive
+                    } else {
+                        AppState::UserIdle
+                    };
+                    *app_state.lock().unwrap() = new_state;
+                    info!(
+                        "State changed to {} (heartbeat failed)",
+                        if is_active { "UserActive" } else { "UserIdle" }
+                    );
                 }
+                // Still update the time of the attempt
+                *last_heartbeat.lock().unwrap() = Instant::now();
             }
         } else {
             // User is idle and keep_nas_on is false
@@ -469,128 +446,6 @@ pub async fn run_background_tasks(
                 info!("State changed to UserIdle");
             }
             // No heartbeat in idle state when keep_nas_on is false
-        }
-    }
-}
-
-fn load_icon_from_resource() -> Option<IconData> {
-    unsafe {
-        // Get the current module handle
-        let hinstance =
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
-
-        // Load the icon from resources
-        // Note: Windows resources use wide strings, so we need to convert
-        let icon_name = windows::core::w!("nas_black_ico");
-
-        let hicon = LoadImageW(
-            Some(HINSTANCE(hinstance.0)),
-            PCWSTR(icon_name.as_ptr()),
-            IMAGE_ICON,
-            0, // width (0 = default)
-            0, // height (0 = default)
-            LR_DEFAULTSIZE,
-        );
-
-        match hicon {
-            Ok(icon) if !icon.is_invalid() => {
-                // Convert HICON to IconData
-
-                let mut icon_info = windows::Win32::UI::WindowsAndMessaging::ICONINFO::default();
-                if GetIconInfo(
-                    windows::Win32::UI::WindowsAndMessaging::HICON(icon.0),
-                    &mut icon_info,
-                )
-                .is_ok()
-                {
-                    let hdc = GetDC(None);
-                    let mem_dc = CreateCompatibleDC(Some(hdc));
-
-                    // Get icon dimensions (assuming 32x32 for tray icon)
-                    let width = 32i32;
-                    let height = 32i32;
-
-                    let bitmap = CreateCompatibleBitmap(hdc, width, height);
-                    let old_bitmap = SelectObject(mem_dc, bitmap.into());
-
-                    // Draw the icon to the bitmap
-                    let _ = DrawIconEx(
-                        mem_dc,
-                        0,
-                        0,
-                        windows::Win32::UI::WindowsAndMessaging::HICON(icon.0),
-                        width,
-                        height,
-                        0,
-                        None,
-                        DI_NORMAL,
-                    );
-
-                    // Prepare bitmap info for getting pixel data
-                    let mut bmi = BITMAPINFO {
-                        bmiHeader: BITMAPINFOHEADER {
-                            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                            biWidth: width,
-                            biHeight: -height, // negative for top-down DIB
-                            biPlanes: 1,
-                            biBitCount: 32,
-                            biCompression: 0, // BI_RGB
-                            biSizeImage: 0,
-                            biXPelsPerMeter: 0,
-                            biYPelsPerMeter: 0,
-                            biClrUsed: 0,
-                            biClrImportant: 0,
-                        },
-                        bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default(); 1],
-                    };
-
-                    // Calculate buffer size
-                    let pixel_count = (width * height) as usize;
-                    let mut pixels = vec![0u8; pixel_count * 4]; // RGBA
-
-                    // Get bitmap bits
-                    let result = GetDIBits(
-                        mem_dc,
-                        bitmap,
-                        0,
-                        height as u32,
-                        Some(pixels.as_mut_ptr() as *mut _),
-                        &mut bmi,
-                        DIB_RGB_COLORS,
-                    );
-
-                    // Clean up GDI objects
-                    SelectObject(mem_dc, old_bitmap);
-                    let _ = DeleteObject(bitmap.into());
-                    let _ = DeleteDC(mem_dc);
-                    ReleaseDC(None, hdc);
-                    let _ = DeleteObject(icon_info.hbmColor.into());
-                    let _ = DeleteObject(icon_info.hbmMask.into());
-
-                    if result > 0 {
-                        // Convert BGRA to RGBA
-                        for chunk in pixels.chunks_mut(4) {
-                            chunk.swap(0, 2); // Swap B and R channels
-                        }
-
-                        Some(IconData {
-                            rgba: pixels,
-                            width: width as u32,
-                            height: height as u32,
-                        })
-                    } else {
-                        log::error!("Failed to get bitmap bits");
-                        None
-                    }
-                } else {
-                    log::error!("Failed to get icon info");
-                    None
-                }
-            }
-            _ => {
-                log::error!("Failed to load icon from resources");
-                None
-            }
         }
     }
 }

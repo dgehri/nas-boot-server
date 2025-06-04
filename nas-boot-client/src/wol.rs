@@ -16,16 +16,16 @@ pub async fn wake_nas(config: &Config) -> Result<()> {
     let mut success = false;
 
     // 1. Try broadcast on all interfaces
-    if let Err(e) = send_wol_broadcast(&packet).await {
-        log::warn!("Broadcast WOL failed: {}", e);
+    if let Err(e) = send_wol_broadcast(&packet) {
+        log::warn!("Broadcast WOL failed: {e}");
     } else {
         success = true;
     }
 
     // 2. Try directed broadcast to subnet
     if let Some(subnet_broadcast) = get_subnet_broadcast(&config.nas_ip) {
-        if let Err(e) = send_wol_to_address(&packet, subnet_broadcast).await {
-            log::warn!("Subnet broadcast WOL failed: {}", e);
+        if let Err(e) = send_wol_to_address(&packet, subnet_broadcast) {
+            log::warn!("Subnet broadcast WOL failed: {e}");
         } else {
             success = true;
         }
@@ -33,8 +33,8 @@ pub async fn wake_nas(config: &Config) -> Result<()> {
 
     // 3. Try sending directly to last known IP
     if let Ok(ip) = config.nas_ip.parse::<Ipv4Addr>() {
-        if let Err(e) = send_wol_to_address(&packet, ip).await {
-            log::warn!("Direct IP WOL failed: {}", e);
+        if let Err(e) = send_wol_to_address(&packet, ip) {
+            log::warn!("Direct IP WOL failed: {e}");
         } else {
             success = true;
         }
@@ -49,7 +49,7 @@ pub async fn wake_nas(config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn send_wol_broadcast(packet: &[u8]) -> Result<()> {
+fn send_wol_broadcast(packet: &[u8]) -> Result<()> {
     // Create socket and enable broadcast
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.set_broadcast(true)?;
@@ -60,13 +60,13 @@ async fn send_wol_broadcast(packet: &[u8]) -> Result<()> {
         socket
             .send_to(packet, addr)
             .context("Failed to send WOL broadcast")?;
-        log::debug!("Sent WOL packet to broadcast address on port {}", port);
+        log::debug!("Sent WOL packet to broadcast address on port {port}");
     }
 
     Ok(())
 }
 
-async fn send_wol_to_address(packet: &[u8], ip: Ipv4Addr) -> Result<()> {
+fn send_wol_to_address(packet: &[u8], ip: Ipv4Addr) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
 
     // Try multiple ports
@@ -75,7 +75,7 @@ async fn send_wol_to_address(packet: &[u8], ip: Ipv4Addr) -> Result<()> {
         socket
             .send_to(packet, addr)
             .context("Failed to send WOL packet")?;
-        log::debug!("Sent WOL packet to {} on port {}", ip, port);
+        log::debug!("Sent WOL packet to {ip} on port {port}");
     }
 
     Ok(())

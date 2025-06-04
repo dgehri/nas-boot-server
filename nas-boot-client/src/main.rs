@@ -88,12 +88,9 @@ fn main() -> Result<()> {
 
 fn run_app() -> Result<()> {
     // Load configuration
-    let config = match load_config() {
-        Ok(config) => config,
-        Err(_) => {
-            generate_config()?;
-            load_config()?
-        }
+    let config = if let Ok(config) = load_config() { config } else {
+        generate_config()?;
+        load_config()?
     };
 
     // Run the GUI app directly - it will spawn its own background tasks
