@@ -128,14 +128,12 @@ impl NasBootGui {
             tray.add_menu_item("Show Window", move || {
                 if let Ok(hwnd) = find_app_window() {
                     show_window(hwnd);
-                    if is_window_iconic(hwnd) {
-                        window_visible.store(true, Ordering::SeqCst);
+                    window_visible.store(true, Ordering::SeqCst);
 
-                        // Also update egui state if possible
-                        if let Some(ctx) = &egui_ctx {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            ctx.request_repaint();
-                        }
+                    // Also update egui state if possible
+                    if let Some(ctx) = &egui_ctx {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.request_repaint();
                     }
                 }
             })?;
@@ -199,7 +197,7 @@ impl NasBootGui {
 }
 
 impl eframe::App for NasBootGui {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         // Ensure the visuals are set to light mode every frame
         ctx.set_visuals(egui::style::Visuals::light());
 
