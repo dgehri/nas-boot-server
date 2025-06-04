@@ -40,14 +40,13 @@ pub async fn wake_nas(config: &Config) -> Result<()> {
         }
     }
 
-    if success {
-        log::info!("WOL packet sent successfully");
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
+    if !success {
+        return Err(anyhow::anyhow!(
             "Failed to send WOL packet through any method"
-        ))
+        ));
     }
+
+    Ok(())
 }
 
 async fn send_wol_broadcast(packet: &[u8]) -> Result<()> {

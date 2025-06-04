@@ -211,13 +211,7 @@ impl eframe::App for NasBootGui {
             }
 
             // and hide this window to the tray
-            self.hide_to_tray(ctx);
-        }
-
-        if ctx.input(|i| i.viewport().close_requested()) && !self.exit.load(Ordering::SeqCst) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            log::info!("Close requested, hiding to tray instead");
-            self.hide_to_tray(ctx);
+            // self.hide_to_tray(ctx);
         }
 
         // Check if we need to update the state (every second)
@@ -337,14 +331,15 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     let keep_nas_on = Arc::new(AtomicBool::new(false));
     let icon = load_icon_from_resource();
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([350.0, 200.0])
-            .with_resizable(false)
-            .with_minimize_button(false)
-            .with_always_on_top()
-            .with_icon(icon.unwrap_or_default()), // Set the icon here
+    let viewport = egui::ViewportBuilder::default()
+        .with_inner_size([350.0, 200.0])
+        .with_resizable(false)
+        .with_minimize_button(false)
+        .with_always_on_top()
+        .with_icon(icon.unwrap_or_default());
 
+    let options = eframe::NativeOptions {
+        viewport,
         ..Default::default()
     };
 
@@ -433,7 +428,9 @@ pub async fn run_background_tasks(
             // Continue sending wake packets when NAS is not yet available
             if current_state != AppState::NasAvailable {
                 info!("Sending WOL packet to NAS");
-                wake_nas(&config).await;
+                if let Err(e) = wake_nas(&config).await {
+                    log::error!("Failed to send WOL packet: {}", e);
+                }
             }
 
             // Send heartbeat and update NAS connection state

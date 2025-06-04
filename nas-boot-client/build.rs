@@ -1,4 +1,4 @@
-use {std::io, winresource::WindowsResource};
+use std::io;
 
 fn main() -> io::Result<()> {
     if cfg!(windows) {
@@ -26,7 +26,8 @@ fn main() -> io::Result<()> {
             tinted.save(format!("assets/nas_{name}.ico")).unwrap();
         }
 
-        WindowsResource::new()
+        #[cfg(windows)]
+        winresource::WindowsResource::new()
             .set_icon("assets/nas_black.ico")
             .set_icon("assets/nas_green.ico")
             .set_icon("assets/nas_red.ico")
