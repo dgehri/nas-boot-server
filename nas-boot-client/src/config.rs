@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use yaml_rust2::YamlLoader;
+
+use crate::wake_mode::WakeMode;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -13,6 +14,8 @@ pub struct Config {
     pub check_interval_secs: u64,
     pub idle_threshold_mins: u32,
     pub heartbeat_timeout_secs: u64,
+    #[serde(default)]
+    pub wake_mode: WakeMode,
 }
 
 impl Default for Config {
@@ -25,6 +28,7 @@ impl Default for Config {
             check_interval_secs: 30,
             idle_threshold_mins: 5,
             heartbeat_timeout_secs: 5,
+            wake_mode: WakeMode::default(),
         }
     }
 }
@@ -49,49 +53,30 @@ pub fn load_config() -> Result<Config> {
         ));
     }
 
-    let config_str = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config from {}", config_path.display()))?;
-
-    let docs = YamlLoader::load_from_str(&config_str).context("Failed to parse YAML")?;
-
-    if docs.is_empty() {
-        return Err(anyhow::anyhow!("Empty configuration file"));
-    }
-
-    let doc = &docs[0];
-
-    let config = Config {
-        nas_mac: doc["nas_mac"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing nas_mac"))?
-            .to_string(),
-        nas_ip: doc["nas_ip"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing nas_ip"))?
-            .to_string(),
-        router_ip: doc["router_ip"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing router_ip"))?
-            .to_string(),
-        heartbeat_url: doc["heartbeat_url"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing heartbeat_url"))?
-            .to_string(),
-        check_interval_secs: doc["check_interval_secs"]
-            .as_i64()
-            .ok_or_else(|| anyhow::anyhow!("Missing check_interval_secs"))?
-            as u64,
-        idle_threshold_mins: doc["idle_threshold_mins"]
-            .as_i64()
-            .ok_or_else(|| anyhow::anyhow!("Missing idle_threshold_mins"))?
-            as u32,
-        heartbeat_timeout_secs: doc["heartbeat_timeout_secs"]
-            .as_i64()
-            .ok_or_else(|| anyhow::anyhow!("Missing heartbeat_timeout_secs"))?
-            as u64,
-    };
+    let config: Config = serde_yaml::from_reader(
+        &fs::File::open(&config_path)
+            .with_context(|| format!("Failed to open config from {}", config_path.display()))?,
+    )
+    .with_context(|| format!("Failed to parse config from {}", config_path.display()))?;
 
     Ok(config)
+}
+
+pub fn save_config(config: &Config) -> Result<()> {
+    let config_path = get_config_path();
+
+    let yaml_content = serde_yaml::to_string(config).with_context(|| {
+        format!(
+            "Failed to serialize config to YAML for {}",
+            config_path.display()
+        )
+    })?;
+
+    fs::write(&config_path, yaml_content)
+        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+
+    println!("Configuration saved to: {}", config_path.display());
+    Ok(())
 }
 
 pub fn generate_config() -> Result<()> {

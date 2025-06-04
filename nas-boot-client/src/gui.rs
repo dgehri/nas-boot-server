@@ -1,47 +1,25 @@
 use crate::app::AppState;
-use crate::config::Config;
+use crate::config::{save_config, Config};
 use crate::nas::send_heartbeat;
 use crate::system::{
     close_window, find_app_window, hide_window, is_auto_start_enabled, is_window_iconic,
     load_icon_from_resource, set_auto_start, show_window,
 };
 use crate::user_activity::is_user_active;
+use crate::wake_mode::WakeMode;
 use crate::wol::wake_nas;
 use anyhow::Result;
 use eframe::{egui, Frame};
 use egui::Margin;
 use log::info;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::time;
 use tray_item::{IconSource, TrayItem};
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum WakeMode {
-    /// NAS won't be woken up or kept on
-    #[default]
-    Off,
-
-    /// NAS will be woken up on user activity and kept on unless user is idle
-    Auto,
-
-    /// NAS will be kept on regardless of user activity
-    AlwaysOn,
-}
-
-impl From<u8> for WakeMode {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => WakeMode::Off,
-            1 => WakeMode::Auto,
-            2 => WakeMode::AlwaysOn,
-            _ => WakeMode::Off,
-        }
-    }
-}
-
 pub struct NasBootGui {
+    config: Config,
     app_state: Arc<Mutex<AppState>>,
     last_heartbeat_time: Arc<Mutex<Instant>>,
     auto_start_enabled: bool,
@@ -50,16 +28,15 @@ pub struct NasBootGui {
     tray_item: Option<TrayItem>,
     egui_ctx: Option<egui::Context>,
     exit: Arc<AtomicBool>,
-    wake_mode: Arc<AtomicU8>,
 }
 
 impl NasBootGui {
     pub fn new(
+        config: Config,
         cc: &eframe::CreationContext<'_>,
         shared_state: Arc<Mutex<AppState>>,
         last_heartbeat: Arc<Mutex<Instant>>,
         window_visible: Arc<AtomicBool>,
-        wake_mode: Arc<AtomicU8>,
     ) -> Self {
         let auto_start_enabled = is_auto_start_enabled();
 
@@ -83,7 +60,7 @@ impl NasBootGui {
             tray_item: None,
             egui_ctx,
             exit: Arc::new(AtomicBool::new(false)),
-            wake_mode,
+            config,
         }
     }
 
@@ -91,12 +68,12 @@ impl NasBootGui {
         let state = *self.app_state.lock().unwrap();
         match state {
             AppState::Unknown => "Status: Unknown".to_string(),
-            AppState::UserIdle => match self.wake_mode.load(Ordering::SeqCst).into() {
+            AppState::UserIdle => match self.config.wake_mode {
                 WakeMode::AlwaysOn => "Status: Keeping NAS always on".to_string(),
                 WakeMode::Auto => "Status: User is idle, NAS will wake on activity".to_string(),
                 WakeMode::Off => "Status: NAS will not wake".to_string(),
             },
-            AppState::UserActive => match self.wake_mode.load(Ordering::SeqCst).into() {
+            AppState::UserActive => match self.config.wake_mode {
                 WakeMode::AlwaysOn => "Status: Keeping NAS always on".to_string(),
                 WakeMode::Auto => "Status: User is active, waking NAS".to_string(),
                 WakeMode::Off => "Status: NAS will not wake".to_string(),
@@ -166,7 +143,7 @@ impl NasBootGui {
             match current_state {
                 AppState::Unknown => tray.set_icon(IconSource::Resource("nas_grey_ico"))?,
                 AppState::UserIdle => tray.set_icon(IconSource::Resource("nas_grey_ico"))?,
-                AppState::UserActive => match self.wake_mode.load(Ordering::SeqCst).into() {
+                AppState::UserActive => match self.config.wake_mode {
                     WakeMode::Off => tray.set_icon(IconSource::Resource("nas_grey_ico"))?,
                     WakeMode::Auto | WakeMode::AlwaysOn => {
                         tray.set_icon(IconSource::Resource("nas_yellow_ico"))?;
@@ -257,11 +234,9 @@ impl eframe::App for NasBootGui {
                 // Use radio buttons for wake mode selection
                 ui.horizontal(|ui| {
                     ui.label("Wake Mode:");
-                    let mut wake_mode = self.wake_mode.load(Ordering::SeqCst);
-                    ui.radio_value(&mut wake_mode, WakeMode::Off as u8, "Off");
-                    ui.radio_value(&mut wake_mode, WakeMode::Auto as u8, "Auto");
-                    ui.radio_value(&mut wake_mode, WakeMode::AlwaysOn as u8, "Always On");
-                    self.wake_mode.store(wake_mode, Ordering::SeqCst);
+                    ui.radio_value(&mut self.config.wake_mode, WakeMode::Off, "Off");
+                    ui.radio_value(&mut self.config.wake_mode, WakeMode::Auto, "Auto");
+                    ui.radio_value(&mut self.config.wake_mode, WakeMode::AlwaysOn, "Always On");
                 });
 
                 ui.add_space(5.0);
@@ -293,6 +268,9 @@ impl eframe::App for NasBootGui {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Clean up resources if needed
         self.tray_item = None;
+
+        // Save config
+        save_config(&self.config).unwrap();
     }
 }
 
@@ -356,18 +334,16 @@ pub fn run_gui_app(config: Config) -> Result<()> {
         });
     });
 
-    let wake_mode = Arc::new(AtomicU8::new(WakeMode::Auto as u8));
-
     eframe::run_native(
         "NAS Boot Client",
         options,
         Box::new(move |cc| {
             Ok(Box::new(NasBootGui::new(
+                config,
                 cc,
                 app_state,
                 last_heartbeat,
                 window_visible,
-                wake_mode,
             )))
         }),
     )

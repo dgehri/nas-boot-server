@@ -42,3 +42,4 @@ windows = { version = "0.61.1", features = [
 winreg = "0.55.0"
 yaml-rust2 = "0.10.2"
 winresource = "0.1.22"
+serde_yaml = "0.9.33"

@@ -14,6 +14,7 @@ mod gui;
 mod nas;
 mod system;
 mod user_activity;
+mod wake_mode;
 mod wol;
 
 #[derive(Parser, Debug)]
