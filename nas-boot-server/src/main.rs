@@ -204,9 +204,7 @@ async fn main() -> Result<()> {
     // Create QNAP logger
     let qnap_logger = QnapLogger;
 
-    let mut loggers: Vec<Box<dyn Log>> = vec![];
-    loggers.push(Box::new(console_logger));
-    loggers.push(Box::new(qnap_logger));
+    let mut loggers: Vec<Box<dyn Log>> = vec![Box::new(console_logger), Box::new(qnap_logger)];
 
     // Combine both loggers
     MultiLogger::init(loggers, log::Level::Debug)?;
@@ -219,8 +217,8 @@ async fn main() -> Result<()> {
     };
 
     match result {
-        Ok(_) => info!("Operation completed successfully"),
-        Err(e) => error!("Operation failed: {}", e),
+        Ok(()) => info!("Operation completed successfully"),
+        Err(e) => error!("Operation failed: {e}"),
     }
 
     Ok(())
@@ -267,9 +265,9 @@ async fn handle_heartbeat(
         Ok(dt) => {
             let hostname = heartbeat.hostname.clone();
             clients.insert(heartbeat.hostname, dt.with_timezone(&Utc));
-            debug!("Heartbeat from {}", hostname);
+            debug!("Heartbeat from {hostname}");
         }
-        Err(e) => error!("Invalid timestamp: {}", e),
+        Err(e) => error!("Invalid timestamp: {e}"),
     }
 
     "OK"
@@ -294,7 +292,7 @@ async fn shutdown_monitor(state: AppState) {
                     active_clients = true;
                     true
                 } else {
-                    info!("Client {} timed out", hostname);
+                    info!("Client {hostname} timed out");
                     false
                 }
             });
@@ -357,6 +355,6 @@ fn initiate_shutdown() {
 
     match Command::new("/sbin/poweroff").spawn() {
         Ok(_) => info!("Shutdown command issued"),
-        Err(e) => error!("Failed to issue shutdown command: {}", e),
+        Err(e) => error!("Failed to issue shutdown command: {e}"),
     }
 }

@@ -3,12 +3,12 @@ pub enum AppState {
     #[default]
     Unknown,
 
-    /// User is idle
-    UserIdle,
+    /// User idle or WOL disabled
+    Idle,
 
-    /// User is active but NAS status unknown
-    UserActive,
+    /// User active and waking up NAS
+    WakeUp,
 
-    /// NAS is available and user is active
-    NasAvailable,
+    /// NAS is ready
+    NasReady,
 }

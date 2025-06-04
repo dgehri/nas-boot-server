@@ -1,6 +1,6 @@
 [package]
 name = "nas-boot-client"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 authors = ["Daniel Gehriger <gehriger@gmail.com>"]
@@ -26,6 +26,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tray-item = { workspace = true }
+parking_lot = { workspace = true }
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]

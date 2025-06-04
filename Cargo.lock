@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "nas-boot-client"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2548,6 +2548,7 @@ dependencies = [
  "hostname",
  "image",
  "log",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
