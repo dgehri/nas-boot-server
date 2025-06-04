@@ -88,7 +88,9 @@ fn main() -> Result<()> {
 
 fn run_app() -> Result<()> {
     // Load configuration
-    let config = if let Ok(config) = load_config() { config } else {
+    let config = if let Ok(config) = load_config() {
+        config
+    } else {
         generate_config()?;
         load_config()?
     };

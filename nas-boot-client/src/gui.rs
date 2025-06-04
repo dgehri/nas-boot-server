@@ -9,6 +9,7 @@ use crate::user_activity::is_user_active;
 use crate::wol::wake_nas;
 use anyhow::Result;
 use eframe::{egui, Frame};
+use egui::{Margin, Theme};
 use log::info;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -222,47 +223,55 @@ impl eframe::App for NasBootGui {
             ctx.request_repaint();
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("NAS Boot Client");
+        // Use central panel with auto-sizing layout
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().inner_margin(Margin::symmetric(10, 10)))
+            .show(ctx, |ui| {
+                // Use a vertical layout with tight spacing for content
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
 
-            // Status display
-            ui.horizontal(|ui| {
-                let status_text = self.update_status_text();
-                ui.label(status_text);
+                    ui.heading("NAS Boot Client");
+
+                    // Status display
+                    ui.horizontal(|ui| {
+                        let status_text = self.update_status_text();
+                        ui.label(status_text);
+                    });
+
+                    ui.add_space(5.0);
+
+                    // Use radio buttons for wake mode selection
+                    ui.horizontal(|ui| {
+                        ui.label("Wake Mode:");
+                        let mut wake_mode = self.wake_mode.load(Ordering::SeqCst);
+                        ui.radio_value(&mut wake_mode, WakeMode::Off as u8, "Off");
+                        ui.radio_value(&mut wake_mode, WakeMode::Auto as u8, "Auto");
+                        ui.radio_value(&mut wake_mode, WakeMode::AlwaysOn as u8, "Always On");
+                        self.wake_mode.store(wake_mode, Ordering::SeqCst);
+                    });
+
+                    ui.add_space(5.0);
+
+                    // Auto-start toggle
+                    ui.horizontal(|ui| {
+                        let mut auto_start = self.auto_start_enabled;
+                        if ui.checkbox(&mut auto_start, "Start with Windows").changed() {
+                            if let Err(e) = set_auto_start(auto_start) {
+                                info!("Failed to set auto-start: {e}");
+                            } else {
+                                self.auto_start_enabled = auto_start;
+                            }
+                        }
+                    });
+
+                    ui.add_space(5.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Last heartbeat: {}", self.last_heartbeat_ago()));
+                    });
+                });
             });
-
-            ui.add_space(10.0);
-
-            // Use radio buttons for wake mode selection
-            ui.horizontal(|ui| {
-                ui.label("Wake Mode:");
-                let mut wake_mode = self.wake_mode.load(Ordering::SeqCst);
-                ui.radio_value(&mut wake_mode, WakeMode::Off as u8, "Off");
-                ui.radio_value(&mut wake_mode, WakeMode::Auto as u8, "Auto");
-                ui.radio_value(&mut wake_mode, WakeMode::AlwaysOn as u8, "Always On");
-                self.wake_mode.store(wake_mode, Ordering::SeqCst);
-            });
-
-            ui.add_space(10.0);
-
-            // Auto-start toggle
-            ui.horizontal(|ui| {
-                let mut auto_start = self.auto_start_enabled;
-                if ui.checkbox(&mut auto_start, "Start with Windows").changed() {
-                    if let Err(e) = set_auto_start(auto_start) {
-                        info!("Failed to set auto-start: {e}");
-                    } else {
-                        self.auto_start_enabled = auto_start;
-                    }
-                }
-            });
-
-            ui.add_space(10.0);
-
-            ui.horizontal(|ui| {
-                ui.label(format!("Last heartbeat: {}", self.last_heartbeat_ago()));
-            });
-        });
 
         // Request repaint once per second
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -282,7 +291,9 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     let keep_nas_on = Arc::new(AtomicBool::new(false));
     let icon = load_icon_from_resource();
 
+    // Create viewport with auto-sizing properties
     let viewport = egui::ViewportBuilder::default()
+        .with_inner_size([280.0, 180.0]) // Initial size that works well for the content
         .with_resizable(false)
         .with_minimize_button(true)
         .with_always_on_top()
@@ -290,6 +301,8 @@ pub fn run_gui_app(config: Config) -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
+        centered: true,
+
         ..Default::default()
     };
 
