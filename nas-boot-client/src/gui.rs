@@ -2,8 +2,8 @@ use crate::app_state::AppState;
 use crate::config::{save_config, Config};
 use crate::nas::send_heartbeat;
 use crate::system::{
-    close_window, find_app_window, hide_window, is_auto_start_enabled, is_window_iconic,
-    load_icon_from_resource, set_auto_start, show_window,
+    close_window, find_app_window, hide_window, is_auto_start_enabled, is_window_minimized,
+    is_window_visible, load_icon_from_resource, set_auto_start, show_window,
 };
 use crate::user_activity::is_user_active;
 use crate::wake_mode::WakeMode;
@@ -12,7 +12,6 @@ use anyhow::Result;
 use eframe::{egui, Frame};
 use egui::Margin;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
@@ -24,10 +23,9 @@ pub struct NasBootGui {
     last_heartbeat_time: Arc<Mutex<Instant>>,
     auto_start_enabled: bool,
     last_check_time: Instant,
-    window_visible: Arc<AtomicBool>,
     tray_item: Option<TrayItem>,
     egui_ctx: Option<egui::Context>,
-    exit: Arc<AtomicBool>,
+    cancel_token: tokio_util::sync::CancellationToken,
 }
 
 impl NasBootGui {
@@ -36,7 +34,7 @@ impl NasBootGui {
         cc: &eframe::CreationContext<'_>,
         shared_state: Arc<Mutex<AppState>>,
         last_heartbeat: Arc<Mutex<Instant>>,
-        window_visible: Arc<AtomicBool>,
+        cancel_token: tokio_util::sync::CancellationToken,
     ) -> Self {
         let auto_start_enabled = is_auto_start_enabled();
 
@@ -56,11 +54,10 @@ impl NasBootGui {
             last_heartbeat_time: last_heartbeat,
             auto_start_enabled,
             last_check_time: Instant::now(),
-            window_visible,
             tray_item: None,
             egui_ctx,
-            exit: Arc::new(AtomicBool::new(false)),
             config,
+            cancel_token,
         }
     }
 
@@ -100,12 +97,10 @@ impl NasBootGui {
             let mut tray = TrayItem::new("NAS Boot Client", IconSource::Resource("nas_black_ico"))?;
 
             // Add "Show Window" menu item using Win32 API directly
-            let window_visible = self.window_visible.clone();
             let egui_ctx = self.egui_ctx.clone();
             tray.add_menu_item("Show Window", move || {
                 if let Ok(hwnd) = find_app_window() {
                     show_window(hwnd);
-                    window_visible.store(true, Ordering::SeqCst);
 
                     // Also update egui state if possible
                     if let Some(ctx) = &egui_ctx {
@@ -116,16 +111,14 @@ impl NasBootGui {
             })?;
 
             // Add "Exit" menu item using Win32 API directly
-            let exit_clone = self.exit.clone();
+            let cancel_token_clone = self.cancel_token.clone();
             tray.add_menu_item("Exit", move || {
-                log::info!("Exiting application");
-                exit_clone.store(true, Ordering::SeqCst);
+                cancel_token_clone.cancel();
 
                 if let Ok(hwnd) = find_app_window() {
                     let () = show_window(hwnd);
                     let _ = close_window(hwnd);
                 }
-                std::process::exit(0);
             })?;
 
             // Update tray icon based on current state
@@ -161,7 +154,6 @@ impl NasBootGui {
 
         // Then use the egui approach as well for good measure
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        self.window_visible.store(false, Ordering::SeqCst);
 
         // Force a repaint to apply changes
         ctx.request_repaint();
@@ -270,6 +262,9 @@ impl eframe::App for NasBootGui {
 
         // Save config
         let _ = save_config(&self.config.lock()).ok();
+
+        // Set cancellation token to signal background tasks to stop
+        self.cancel_token.cancel();
     }
 }
 
@@ -278,7 +273,6 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     let config = Arc::new(Mutex::new(config));
     let app_state = Arc::new(Mutex::new(AppState::Unknown));
     let last_heartbeat = Arc::new(Mutex::new(Instant::now()));
-    let window_visible = Arc::new(AtomicBool::new(true));
     let icon = load_icon_from_resource();
 
     // Create viewport with auto-sizing properties
@@ -298,36 +292,56 @@ pub fn run_gui_app(config: Config) -> Result<()> {
         ..Default::default()
     };
 
-    // Pass shared state to background tasks
-    let config_clone = config.clone();
-    let app_state_clone = app_state.clone();
-    let last_heartbeat_clone = last_heartbeat.clone();
-    let window_visible_clone = window_visible.clone();
+    // Create cancellation token for graceful shutdown
+    let cancel_token = tokio_util::sync::CancellationToken::new();
 
-    // Start background task in its own thread - this will continue running even when window is hidden
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            // Start the main background task
-            let background_task = tokio::spawn(async move {
-                if let Err(e) =
-                    run_background_task(config_clone, app_state_clone, last_heartbeat_clone).await
-                {
-                    log::error!("Background task error: {e}");
+    // Pass shared state to background tasks
+    {
+        let config = config.clone();
+        let app_state = app_state.clone();
+        let last_heartbeat = last_heartbeat.clone();
+        let cancel_token = cancel_token.clone();
+
+        // Start background task in its own thread - this will continue running even when window is hidden
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                // Start the main background task
+                let background_task = {
+                    let cancel_token = cancel_token.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            run_background_task(config, app_state, last_heartbeat, cancel_token)
+                                .await
+                        {
+                            log::error!("Background task error: {e}");
+                        }
+                    })
+                };
+
+                // Start the window visibility monitoring task
+                let window_monitor_task = {
+                    let cancel_token = cancel_token.clone();
+                    tokio::spawn(async move { run_minimizer_task(cancel_token).await })
+                };
+
+                // Wait for either task to complete
+                tokio::select! {
+                    _ = background_task => {},
+                    _ = window_monitor_task => {},
+                    _ = tokio::signal::ctrl_c() => {
+                        log::info!("Received Ctrl+C, shutting down...");
+                        cancel_token.cancel();
+                    },
+                }
+
+                if let Ok(hwnd) = find_app_window() {
+                    show_window(hwnd);
+                    let _ = close_window(hwnd);
                 }
             });
-
-            // Start the window visibility monitoring task
-            let window_monitor_task =
-                tokio::spawn(async move { run_minimizer_task(window_visible_clone).await });
-
-            // Wait for either task to complete (they should run indefinitely)
-            tokio::select! {
-                _ = background_task => {},
-                _ = window_monitor_task => {},
-            }
         });
-    });
+    }
 
     eframe::run_native(
         "NAS Boot Client",
@@ -338,7 +352,7 @@ pub fn run_gui_app(config: Config) -> Result<()> {
                 cc,
                 app_state,
                 last_heartbeat,
-                window_visible,
+                cancel_token,
             )))
         }),
     )
@@ -347,19 +361,24 @@ pub fn run_gui_app(config: Config) -> Result<()> {
     Ok(())
 }
 
-async fn run_minimizer_task(window_visible: Arc<AtomicBool>) -> ! {
-    let mut interval = time::interval(Duration::from_millis(100));
+async fn run_minimizer_task(cancel_token: tokio_util::sync::CancellationToken) {
+    let mut interval = time::interval(Duration::from_millis(500));
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            () = cancel_token.cancelled() => {
+                log::info!("Minimizer task cancelled");
+                break;
+            }
 
-        // Find the window each time instead of caching it
-        if let Ok(hwnd) = find_app_window() {
-            // Check if window should be hidden but isn't in tray
-            if window_visible.load(Ordering::SeqCst) && is_window_iconic(hwnd) {
-                log::info!("Window is visible but should be hidden - hiding to tray");
-                hide_window(hwnd);
-                window_visible.store(false, Ordering::SeqCst);
+            _ = interval.tick() => {
+                // Find the window each time instead of caching it
+                if let Ok(hwnd) = find_app_window() {
+                    // Check if window should be hidden but isn't in tray
+                    if is_window_visible(hwnd) && is_window_minimized(hwnd) {
+                        hide_window(hwnd);
+                    }
+                }
             }
         }
     }
@@ -369,11 +388,22 @@ pub async fn run_background_task(
     config: Arc<Mutex<Config>>,
     app_state: Arc<Mutex<AppState>>,
     last_heartbeat: Arc<Mutex<Instant>>,
+    cancel_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(config.lock().check_interval_secs));
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            () = cancel_token.cancelled() => {
+                log::info!("Background task cancelled");
+                break;
+            }
+
+            _ = interval.tick() => {
+                // Continue checking user activity
+            }
+        }
+
         let config = config.lock().clone();
         let is_user_active = is_user_active(config.idle_threshold_mins);
 
@@ -413,4 +443,6 @@ pub async fn run_background_task(
 
         *app_state.lock() = next_state;
     }
+
+    Ok(())
 }

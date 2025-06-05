@@ -10,6 +10,7 @@ use windows::Win32::Graphics::Gdi::{
     ReleaseDC, SelectObject,
 };
 use windows::Win32::Graphics::Gdi::{BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS};
+use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
 use windows::Win32::UI::WindowsAndMessaging::{DrawIconEx, GetIconInfo, DI_NORMAL};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, IsIconic, PostMessageW, ShowWindow, SW_HIDE, SW_NORMAL, SW_RESTORE, WM_CLOSE,
@@ -86,8 +87,14 @@ pub fn hide_window(hwnd: HWND) {
     }
 }
 
-pub fn is_window_iconic(hwnd: HWND) -> bool {
+/// Check if the window is minimized
+pub fn is_window_minimized(hwnd: HWND) -> bool {
     unsafe { IsIconic(hwnd).as_bool() }
+}
+
+/// Check if the window is visible
+pub fn is_window_visible(hwnd: HWND) -> bool {
+    unsafe { IsWindowVisible(hwnd).as_bool() }
 }
 
 // Close the window by sending a WM_CLOSE message
