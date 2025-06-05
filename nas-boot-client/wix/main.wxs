@@ -165,7 +165,7 @@
         <!-- Custom action to close the application during uninstall -->
         <CustomAction Id="CloseApplication"
             Directory="APPLICATIONFOLDER"
-            ExeCommand="cmd.exe /c taskkill /F /IM nas-boot-client.exe"
+            ExeCommand="cmd.exe /c taskkill /F /IM nas-boot-client.exe &amp; timeout /t 2 /nobreak >nul"
             Execute="immediate"
             Return="ignore" />
 
