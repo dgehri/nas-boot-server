@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
     // Create QNAP logger
     let qnap_logger = QnapLogger;
 
-    let mut loggers: Vec<Box<dyn Log>> = vec![Box::new(console_logger), Box::new(qnap_logger)];
+    let loggers: Vec<Box<dyn Log>> = vec![Box::new(console_logger), Box::new(qnap_logger)];
 
     // Combine both loggers
     MultiLogger::init(loggers, log::Level::Debug)?;

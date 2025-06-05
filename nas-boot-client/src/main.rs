@@ -8,7 +8,7 @@ use config::{generate_config, load_config};
 use log::info;
 use system::set_auto_start;
 
-mod app;
+mod app_state;
 mod config;
 mod gui;
 mod nas;

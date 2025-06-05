@@ -1,4 +1,4 @@
-use crate::app::AppState;
+use crate::app_state::AppState;
 use crate::config::{save_config, Config};
 use crate::nas::send_heartbeat;
 use crate::system::{
@@ -286,6 +286,8 @@ pub fn run_gui_app(config: Config) -> Result<()> {
         .with_inner_size([280.0, 180.0]) // Initial size that works well for the content
         .with_resizable(false)
         .with_minimize_button(true)
+        .with_maximize_button(false)
+        .with_close_button(false)
         .with_always_on_top()
         .with_icon(icon.unwrap_or_default());
 
