@@ -1,6 +1,6 @@
 [package]
 name = "nas-boot-client"
-version = "0.5.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 authors = ["Daniel Gehriger <gehriger@gmail.com>"]
@@ -28,6 +28,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tray-item = { workspace = true }
 parking_lot = { workspace = true }
+open = { workspace = true }
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]

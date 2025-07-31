@@ -1,4 +1,6 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use tokio::net::UdpSocket;
+use tokio::time::{timeout, Duration};
 
 use crate::config::Config;
 use anyhow::{Context, Result};
@@ -12,46 +14,45 @@ pub async fn wake_nas(config: &Config) -> Result<()> {
         packet.extend_from_slice(&mac_bytes); // MAC address repeated 16 times
     }
 
-    // Try multiple approaches to ensure delivery
+    // Try multiple approaches with timeouts to prevent blocking
     let mut success = false;
 
-    // 1. Try broadcast on all interfaces
-    if let Err(e) = send_wol_broadcast(&packet) {
-        log::warn!("Broadcast WOL failed: {e}");
-    } else {
-        success = true;
+    // 1. Try broadcast on all interfaces with timeout
+    match timeout(Duration::from_secs(2), send_wol_broadcast(&packet)).await {
+        Ok(Ok(())) => success = true,
+        Ok(Err(e)) => log::warn!("Broadcast WOL failed: {e}"),
+        Err(_) => log::warn!("Broadcast WOL timed out"),
     }
 
-    // 2. Try directed broadcast to subnet
+    // 2. Try directed broadcast to subnet with timeout
     if let Some(subnet_broadcast) = get_subnet_broadcast(&config.nas_ip) {
-        if let Err(e) = send_wol_to_address(&packet, subnet_broadcast) {
-            log::warn!("Subnet broadcast WOL failed: {e}");
-        } else {
-            success = true;
+        match timeout(Duration::from_secs(2), send_wol_to_address(&packet, subnet_broadcast)).await {
+            Ok(Ok(())) => success = true,
+            Ok(Err(e)) => log::warn!("Subnet broadcast WOL failed: {e}"),
+            Err(_) => log::warn!("Subnet broadcast WOL timed out"),
         }
     }
 
-    // 3. Try sending directly to last known IP
+    // 3. Try sending directly to last known IP with timeout
     if let Ok(ip) = config.nas_ip.parse::<Ipv4Addr>() {
-        if let Err(e) = send_wol_to_address(&packet, ip) {
-            log::warn!("Direct IP WOL failed: {e}");
-        } else {
-            success = true;
+        match timeout(Duration::from_secs(2), send_wol_to_address(&packet, ip)).await {
+            Ok(Ok(())) => success = true,
+            Ok(Err(e)) => log::warn!("Direct IP WOL failed: {e}"),
+            Err(_) => log::warn!("Direct IP WOL timed out"),
         }
     }
 
     if !success {
-        return Err(anyhow::anyhow!(
-            "Failed to send WOL packet through any method"
-        ));
+        log::warn!("All WOL methods failed or timed out, but continuing...");
+        // Don't return error - WOL failures shouldn't crash the app
     }
 
     Ok(())
 }
 
-fn send_wol_broadcast(packet: &[u8]) -> Result<()> {
-    // Create socket and enable broadcast
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
+async fn send_wol_broadcast(packet: &[u8]) -> Result<()> {
+    // Create async socket and enable broadcast
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
 
     // Send to multiple common WOL ports
@@ -59,6 +60,7 @@ fn send_wol_broadcast(packet: &[u8]) -> Result<()> {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)), *port);
         socket
             .send_to(packet, addr)
+            .await
             .context("Failed to send WOL broadcast")?;
         log::debug!("Sent WOL packet to broadcast address on port {port}");
     }
@@ -66,14 +68,15 @@ fn send_wol_broadcast(packet: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn send_wol_to_address(packet: &[u8], ip: Ipv4Addr) -> Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
+async fn send_wol_to_address(packet: &[u8], ip: Ipv4Addr) -> Result<()> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
 
     // Try multiple ports
     for port in &[7, 9] {
         let addr = SocketAddr::new(IpAddr::V4(ip), *port);
         socket
             .send_to(packet, addr)
+            .await
             .context("Failed to send WOL packet")?;
         log::debug!("Sent WOL packet to {ip} on port {port}");
     }

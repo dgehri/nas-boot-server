@@ -25,7 +25,7 @@ impl Default for Config {
             nas_ip: "192.168.42.2".to_string(),
             router_ip: "192.168.42.1".to_string(),
             heartbeat_url: "http://192.168.42.2:8090/heartbeat".to_string(),
-            check_interval_secs: 30,
+            check_interval_secs: 60, // Increased from 30 to 60 seconds to reduce CPU usage
             idle_threshold_mins: 5,
             heartbeat_timeout_secs: 5,
             wake_mode: WakeMode::default(),

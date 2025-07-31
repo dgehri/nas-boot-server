@@ -26,6 +26,8 @@ pub struct NasBootGui {
     tray_item: Option<TrayItem>,
     egui_ctx: Option<egui::Context>,
     cancel_token: tokio_util::sync::CancellationToken,
+    last_known_state: AppState,
+    last_wake_mode: WakeMode,
 }
 
 impl NasBootGui {
@@ -58,6 +60,8 @@ impl NasBootGui {
             egui_ctx,
             config,
             cancel_token,
+            last_known_state: AppState::Unknown,
+            last_wake_mode: WakeMode::default(),
         }
     }
 
@@ -108,6 +112,36 @@ impl NasBootGui {
                         ctx.request_repaint();
                     }
                 }
+            })?;
+
+            // Add "Open NAS Web Page" menu item
+            let config_for_web = self.config.clone();
+            tray.add_menu_item("Open NAS Web Page", move || {
+                let config = config_for_web.lock();
+                let web_url = format!("http://{}", config.nas_ip);
+                let _ = open_url(&web_url); // Non-blocking, handles its own errors
+            })?;
+
+            // Add "Open NAS Drive" menu item
+            let config_for_drive = self.config.clone();
+            tray.add_menu_item("Open NAS Drive", move || {
+                let config = config_for_drive.lock();
+                // Use IP address for UNC path - user can modify config if hostname needed
+                let unc_path = format!("\\\\{}", config.nas_ip);
+
+                // Try primary path, with fallback in the same thread
+                std::thread::spawn(move || {
+                    if let Err(e) = open::that(&unc_path) {
+                        log::warn!("Failed to open NAS drive at {}: {}", unc_path, e);
+                        // Try with fajita.local as fallback
+                        let fallback_path = "\\\\fajita.local";
+                        if let Err(e2) = open::that(fallback_path) {
+                            log::error!("Fallback path {} also failed: {}", fallback_path, e2);
+                        } else {
+                            log::info!("Successfully opened fallback path: {}", fallback_path);
+                        }
+                    }
+                });
             })?;
 
             // Add "Exit" menu item using Win32 API directly
@@ -180,19 +214,31 @@ impl eframe::App for NasBootGui {
             self.hide_to_tray(ctx);
         }
 
-        // Check if we need to update the state (every second)
-        if self.last_check_time.elapsed() > Duration::from_secs(1) {
+        // Check if state has changed
+        let current_state = *self.app_state.lock();
+        let current_wake_mode = self.config.lock().wake_mode;
+        let state_changed =
+            current_state != self.last_known_state || current_wake_mode != self.last_wake_mode;
+
+        // Only update status periodically or if state changed - increased interval to reduce CPU usage
+        if state_changed || self.last_check_time.elapsed() > Duration::from_secs(30) {
             self.last_check_time = Instant::now();
+            self.last_known_state = current_state;
+            self.last_wake_mode = current_wake_mode;
 
-            // Refresh auto-start status
-            self.auto_start_enabled = is_auto_start_enabled();
-
-            // Update tray icon if state changed
-            if let Err(e) = self.update_tray_icon() {
-                log::error!("Failed to update tray icon: {e}");
+            // Only refresh auto-start status when state actually changed, not on timer
+            if state_changed {
+                self.auto_start_enabled = is_auto_start_enabled();
             }
 
-            // Request repaint to show latest state
+            // Update tray icon if state changed
+            if state_changed {
+                if let Err(e) = self.update_tray_icon() {
+                    log::error!("Failed to update tray icon: {e}");
+                }
+            }
+
+            // Request repaint only when we've updated something
             ctx.request_repaint();
         }
 
@@ -221,13 +267,18 @@ impl eframe::App for NasBootGui {
                 // Use radio buttons for wake mode selection
                 {
                     let mut wake_mode = self.config.lock().wake_mode;
+                    let old_wake_mode = wake_mode;
                     ui.horizontal(|ui| {
                         ui.label("Wake Mode:");
                         ui.radio_value(&mut wake_mode, WakeMode::Off, "Off");
                         ui.radio_value(&mut wake_mode, WakeMode::Auto, "Auto");
                         ui.radio_value(&mut wake_mode, WakeMode::AlwaysOn, "Always On");
                     });
-                    self.config.lock().wake_mode = wake_mode;
+                    if wake_mode != old_wake_mode {
+                        self.config.lock().wake_mode = wake_mode;
+                        // Request immediate repaint when user changes settings
+                        ctx.request_repaint();
+                    }
                 }
 
                 ui.add_space(5.0);
@@ -241,6 +292,8 @@ impl eframe::App for NasBootGui {
                         } else {
                             self.auto_start_enabled = auto_start;
                         }
+                        // Request immediate repaint when user changes settings
+                        ctx.request_repaint();
                     }
                 });
 
@@ -252,8 +305,10 @@ impl eframe::App for NasBootGui {
             });
         });
 
-        // Request repaint once per second
-        ctx.request_repaint_after(Duration::from_secs(1));
+        // Only request periodic repaints if window is visible
+        if ctx.input(|i| !i.viewport().minimized.unwrap_or(false)) {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -362,7 +417,7 @@ pub fn run_gui_app(config: Config) -> Result<()> {
 }
 
 async fn run_minimizer_task(cancel_token: tokio_util::sync::CancellationToken) {
-    let mut interval = time::interval(Duration::from_millis(500));
+    let mut interval = time::interval(Duration::from_millis(500)); // Fast enough for responsive minimize-to-tray
 
     loop {
         tokio::select! {
@@ -391,6 +446,10 @@ pub async fn run_background_task(
     cancel_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(config.lock().check_interval_secs));
+
+    // Create a channel for state change notifications
+    let state_change_tx = Arc::new(tokio::sync::watch::channel(()).0);
+    let _state_change_rx = state_change_tx.subscribe(); // Unused for now, but ready for future event-driven updates
 
     loop {
         tokio::select! {
@@ -441,8 +500,24 @@ pub async fn run_background_task(
             AppState::Idle
         };
 
-        *app_state.lock() = next_state;
+        let old_state = *app_state.lock();
+        if old_state != next_state {
+            *app_state.lock() = next_state;
+            // Notify about state change
+            let _ = state_change_tx.send(());
+        }
     }
 
+    Ok(())
+}
+
+// Helper function to open a URL in the default browser (non-blocking)
+fn open_url(url: &str) -> Result<()> {
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        if let Err(e) = open::that(&url) {
+            log::error!("Failed to open URL {}: {}", url, e);
+        }
+    });
     Ok(())
 }
